@@ -2152,7 +2152,7 @@ function SettingsTab({
 export default function SolarProgressTrackerApp() {
   return <AppShell />;
 }
-function readEnvValue(arg0: string) {
+function readEnvValue(_arg0: string) {
   throw new Error("Function not implemented.");
 }
 
