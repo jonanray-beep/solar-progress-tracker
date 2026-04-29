@@ -1,29 +1,29 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createClient, type Session, type SupabaseClient } from "@supabase/supabase-js";
 import {
-  ResponsiveContainer,
-  ComposedChart,
+  Bar,
   CartesianGrid,
+  ComposedChart,
+  Legend,
+  Line,
+  ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
-  Tooltip,
-  Legend,
-  Bar,
-  Line,
-  ReferenceLine,
 } from "recharts";
 
-const STORAGE_KEY = "solar-progress-tracker-web-v53";
-const HISTORY_WORKDAYS = 5;
-const FORECAST_WORKDAYS = 15;
+const STORAGE_KEY = "solar-progress-tracker-web-v54";
+const SHARED_STATE_ROW_ID = "global-shared-state";
+const AUTH_REDIRECT_URL = typeof window !== "undefined" ? window.location.origin : undefined;
 
 type UserRole = "Admin" | "Editor" | "Viewer";
 type WeatherType = "clear" | "cloudy" | "wind" | "rain" | "storm" | "snow";
 type TabKey = "dashboard" | "tasks" | "entries" | "weather" | "users" | "settings";
-type Tone = "slate" | "green" | "amber" | "red" | "blue";
 
-type User = {
+type AppUser = {
   id: string;
   name: string;
+  email: string;
   role: UserRole;
 };
 
@@ -31,11 +31,10 @@ type Task = {
   id: string;
   name: string;
   category: string;
-  assignedUserIds: string[];
   startDate: string;
   targetFinish: string;
   plannedQty: number;
-  completeQty: number;
+  baselineCompleteQty: number;
   unit: string;
   active: boolean;
   notes: string;
@@ -79,32 +78,17 @@ type Project = {
 };
 
 type AppState = {
-  users: User[];
+  users: AppUser[];
   projects: Project[];
 };
 
-type WeatherTypeMeta = {
-  value: WeatherType;
-  label: string;
-  factor: number;
+type SharedStateRow = {
+  id: string;
+  payload: AppState;
+  updated_at?: string;
 };
 
-type TaskChartPoint = {
-  date: string;
-  label: string;
-  actualQty: number | null;
-  requiredQty: number | null;
-  trendQty: number | null;
-  actualHeadcount: number | null;
-  requiredHeadcount: number | null;
-  trendHeadcount: number | null;
-};
-
-type IconProps = {
-  className?: string;
-};
-
-const WEATHER_TYPES: WeatherTypeMeta[] = [
+const WEATHER_TYPES: Array<{ value: WeatherType; label: string; factor: number }> = [
   { value: "clear", label: "Clear", factor: 1 },
   { value: "cloudy", label: "Cloudy", factor: 0.95 },
   { value: "wind", label: "Wind", factor: 0.8 },
@@ -113,149 +97,23 @@ const WEATHER_TYPES: WeatherTypeMeta[] = [
   { value: "snow", label: "Snow/Ice", factor: 0.15 },
 ];
 
-function IconBase({ className = "h-5 w-5", children }: React.PropsWithChildren<IconProps>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
-      {children}
-    </svg>
-  );
+function readEnvValue(key: string): string | undefined {
+  try {
+    const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
+    return meta.env?.[key];
+  } catch {
+    return undefined;
+  }
 }
 
-function AlertTriangleIcon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <path d="M12 3 2 21h20L12 3Z" />
-      <path d="M12 9v4" />
-      <path d="M12 17h.01" />
-    </IconBase>
-  );
-}
-
-function BarChart3Icon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <path d="M3 3v18h18" />
-      <path d="M7 15v-4" />
-      <path d="M12 15V7" />
-      <path d="M17 15v-7" />
-    </IconBase>
-  );
-}
-
-function CalendarDaysIcon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <rect x="3" y="4" width="18" height="17" rx="2" />
-      <path d="M8 2v4" />
-      <path d="M16 2v4" />
-      <path d="M3 10h18" />
-      <path d="M8 14h.01" />
-      <path d="M12 14h.01" />
-      <path d="M16 14h.01" />
-    </IconBase>
-  );
-}
-
-function CheckCircle2Icon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="m9 12 2 2 4-4" />
-    </IconBase>
-  );
-}
-
-function ClipboardListIcon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <rect x="5" y="4" width="14" height="17" rx="2" />
-      <path d="M9 4h6v3H9z" />
-      <path d="M9 11h6" />
-      <path d="M9 15h6" />
-      <path d="M7 11h.01" />
-      <path d="M7 15h.01" />
-    </IconBase>
-  );
-}
-
-function CloudRainIcon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <path d="M7 18a4 4 0 1 1 .9-7.9A5 5 0 0 1 17 8a4 4 0 1 1 0 8H7Z" />
-      <path d="M8 19v2" />
-      <path d="M12 19v2" />
-      <path d="M16 19v2" />
-    </IconBase>
-  );
-}
-
-function DatabaseIcon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <ellipse cx="12" cy="5" rx="8" ry="3" />
-      <path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5" />
-      <path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" />
-    </IconBase>
-  );
-}
-
-function Edit3Icon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <path d="M12 20h9" />
-      <path d="m16.5 3.5 4 4L8 20l-5 1 1-5 12.5-12.5Z" />
-    </IconBase>
-  );
-}
-
-function PlusIcon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <path d="M12 5v14" />
-      <path d="M5 12h14" />
-    </IconBase>
-  );
-}
-
-function RefreshCwIcon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <path d="M21 12a9 9 0 0 0-15.5-6.4" />
-      <path d="M3 4v5h5" />
-      <path d="M3 12a9 9 0 0 0 15.5 6.4" />
-      <path d="M21 20v-5h-5" />
-    </IconBase>
-  );
-}
-
-function Trash2Icon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <path d="M3 6h18" />
-      <path d="M8 6V4h8v2" />
-      <path d="M19 6l-1 14H6L5 6" />
-      <path d="M10 11v6" />
-      <path d="M14 11v6" />
-    </IconBase>
-  );
-}
-
-function UsersIcon({ className }: IconProps) {
-  return (
-    <IconBase className={className}>
-      <path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2" />
-      <circle cx="9.5" cy="7" r="3" />
-      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 4.13a4 4 0 0 1 0 7.75" />
-    </IconBase>
-  );
-}
+const SUPABASE_URL = readEnvValue("VITE_SUPABASE_URL");
+const SUPABASE_ANON_KEY = readEnvValue("VITE_SUPABASE_ANON_KEY");
 
 function uid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  return Math.random().toString(36).slice(2, 10);
+  return Math.random().toString(36).slice(2, 12);
 }
 
 function parseDate(dateStr: string): Date {
@@ -302,16 +160,6 @@ function addWorkdays(dateStr: string, workdays: number): string {
   return cursor;
 }
 
-function getPreviousWorkdays(endDate: string, count: number): string[] {
-  const dates: string[] = [];
-  let cursor = endDate;
-  while (dates.length < count) {
-    if (isWorkday(cursor)) dates.unshift(cursor);
-    cursor = addDays(cursor, -1);
-  }
-  return dates;
-}
-
 function getNextWorkdays(startDate: string, count: number): string[] {
   const dates: string[] = [];
   let cursor = startDate;
@@ -320,24 +168,6 @@ function getNextWorkdays(startDate: string, count: number): string[] {
     cursor = addDays(cursor, 1);
   }
   return dates;
-}
-
-function avg(values: number[]): number {
-  return values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
-}
-
-function sum(values: number[]): number {
-  return values.reduce((a, b) => a + b, 0);
-}
-
-function clamp(n: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, n));
-}
-
-function fmt(value: number, digits = 0): string {
-  return Number.isFinite(value)
-    ? value.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })
-    : "0";
 }
 
 function safeNumber(value: unknown, fallback = 0): number {
@@ -353,7 +183,24 @@ function safePositiveInteger(value: unknown, fallback = 1): number {
   return Math.max(1, Math.floor(safeNumber(value, fallback)));
 }
 
-function weatherMeta(type: string): WeatherTypeMeta {
+function sum(values: number[]): number {
+  return values.reduce((a, b) => a + b, 0);
+}
+
+function avg(values: number[]): number {
+  return values.length ? sum(values) / values.length : 0;
+}
+
+function fmt(value: number, digits = 0): string {
+  return Number.isFinite(value)
+    ? value.toLocaleString(undefined, {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      })
+    : "0";
+}
+
+function weatherMeta(type: string) {
   return WEATHER_TYPES.find((item) => item.value === type) || WEATHER_TYPES[0];
 }
 
@@ -369,7 +216,7 @@ function buildDefaultWeather(): WeatherDay[] {
   return getNextWorkdays(todayISO(), 10).map((date, index) => ({
     id: uid(),
     date,
-    type: (index < 4 ? "clear" : index < 7 ? "cloudy" : "rain") as WeatherType,
+    type: index < 4 ? "clear" : index < 7 ? "cloudy" : "rain",
     note: "",
     source: "manual",
   }));
@@ -378,8 +225,8 @@ function buildDefaultWeather(): WeatherDay[] {
 function buildDefaultState(): AppState {
   return {
     users: [
-      { id: uid(), name: "Superintendent", role: "Admin" },
-      { id: uid(), name: "Project Engineer", role: "Editor" },
+      { id: uid(), name: "Superintendent", email: "", role: "Admin" },
+      { id: uid(), name: "Project Engineer", email: "", role: "Editor" },
     ],
     projects: [
       {
@@ -395,11 +242,10 @@ function buildDefaultState(): AppState {
             id: uid(),
             name: "Pile Installation",
             category: "Civil",
-            assignedUserIds: [],
             startDate: addDays(todayISO(), -14),
             targetFinish: addWorkdays(todayISO(), 10),
             plannedQty: 5000,
-            completeQty: 2350,
+            baselineCompleteQty: 2350,
             unit: "piles",
             active: true,
             notes: "Mainline tracker task",
@@ -409,11 +255,10 @@ function buildDefaultState(): AppState {
             id: uid(),
             name: "Table Build",
             category: "Mechanical",
-            assignedUserIds: [],
             startDate: addDays(todayISO(), -10),
             targetFinish: addWorkdays(todayISO(), 20),
             plannedQty: 2000,
-            completeQty: 620,
+            baselineCompleteQty: 620,
             unit: "tables",
             active: true,
             notes: "Depends on pile handoff",
@@ -431,54 +276,66 @@ function sanitizeState(state: unknown): AppState {
   const fallback = buildDefaultState();
   if (!state || typeof state !== "object") return fallback;
   const raw = state as Partial<AppState>;
-  if (!Array.isArray(raw.projects) || !Array.isArray(raw.users)) return fallback;
+  if (!Array.isArray(raw.users) || !Array.isArray(raw.projects)) return fallback;
+
   return {
     users: raw.users.map((user: any) => ({
       id: typeof user?.id === "string" ? user.id : uid(),
-      name: user?.name || "User",
-      role: (user?.role === "Admin" || user?.role === "Editor" || user?.role === "Viewer" ? user.role : "Editor") as UserRole,
+      name: typeof user?.name === "string" ? user.name : "User",
+      email: typeof user?.email === "string" ? user.email : "",
+      role:
+        user?.role === "Admin" || user?.role === "Editor" || user?.role === "Viewer"
+          ? user.role
+          : "Editor",
     })),
     projects: raw.projects.map((project: any) => ({
       id: typeof project?.id === "string" ? project.id : uid(),
-      name: project?.name || "Untitled Project",
-      location: project?.location || "",
-      status: project?.status || "Active",
-      startDate: project?.startDate || todayISO(),
-      targetFinish: project?.targetFinish || addWorkdays(todayISO(), 20),
+      name: typeof project?.name === "string" ? project.name : "Untitled Project",
+      location: typeof project?.location === "string" ? project.location : "",
+      status: typeof project?.status === "string" ? project.status : "Active",
+      startDate: typeof project?.startDate === "string" ? project.startDate : todayISO(),
+      targetFinish:
+        typeof project?.targetFinish === "string" ? project.targetFinish : addWorkdays(todayISO(), 20),
       weather:
         Array.isArray(project?.weather) && project.weather.length > 0
-          ? project.weather.map((day: any, idx: number) => ({
+          ? project.weather.map((day: any, index: number) => ({
               id: typeof day?.id === "string" ? day.id : uid(),
-              date: day?.date || getNextWorkdays(todayISO(), 10)[idx] || todayISO(),
+              date:
+                typeof day?.date === "string"
+                  ? day.date
+                  : getNextWorkdays(todayISO(), 10)[index] || todayISO(),
               type: weatherMeta(day?.type).value,
-              note: day?.note || "",
+              note: typeof day?.note === "string" ? day.note : "",
               source: day?.source === "api" ? "api" : "manual",
             }))
           : buildDefaultWeather(),
       tasks: Array.isArray(project?.tasks)
         ? project.tasks.map((task: any) => ({
             id: typeof task?.id === "string" ? task.id : uid(),
-            name: task?.name || "Task",
-            category: task?.category || "General",
-            assignedUserIds: Array.isArray(task?.assignedUserIds) ? task.assignedUserIds.filter((id: unknown) => typeof id === "string") : [],
-            startDate: task?.startDate || todayISO(),
-            targetFinish: task?.targetFinish || addWorkdays(todayISO(), 10),
+            name: typeof task?.name === "string" ? task.name : "Task",
+            category: typeof task?.category === "string" ? task.category : "General",
+            startDate: typeof task?.startDate === "string" ? task.startDate : todayISO(),
+            targetFinish:
+              typeof task?.targetFinish === "string" ? task.targetFinish : addWorkdays(todayISO(), 10),
             plannedQty: safeNonNegativeNumber(task?.plannedQty, 0),
-            completeQty: safeNonNegativeNumber(task?.completeQty, 0),
-            unit: task?.unit || "units",
+            baselineCompleteQty: safeNonNegativeNumber(task?.baselineCompleteQty ?? task?.completeQty, 0),
+            unit: typeof task?.unit === "string" ? task.unit : "units",
             active: task?.active !== false,
-            notes: task?.notes || "",
-            targetProductivityPerPerson: Math.max(0.01, safeNonNegativeNumber(task?.targetProductivityPerPerson, 1)),
+            notes: typeof task?.notes === "string" ? task.notes : "",
+            targetProductivityPerPerson: Math.max(
+              0.01,
+              safeNonNegativeNumber(task?.targetProductivityPerPerson, 1),
+            ),
           }))
         : [],
       dailyEntries: Array.isArray(project?.dailyEntries)
         ? project.dailyEntries.map((entry: any) => ({
             id: typeof entry?.id === "string" ? entry.id : uid(),
-            date: entry?.date || todayISO(),
+            date: typeof entry?.date === "string" ? entry.date : todayISO(),
             taskId: typeof entry?.taskId === "string" ? entry.taskId : null,
             qty: safeNonNegativeNumber(entry?.qty, 0),
             headcount: safeNonNegativeNumber(entry?.headcount, 0),
-            note: entry?.note || "",
+            note: typeof entry?.note === "string" ? entry.note : "",
             applied: Boolean(entry?.applied),
           }))
         : [],
@@ -490,7 +347,7 @@ function sanitizeState(state: unknown): AppState {
   };
 }
 
-function loadState(): AppState {
+function loadLocalState(): AppState {
   try {
     if (typeof localStorage === "undefined") return buildDefaultState();
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -507,46 +364,66 @@ function saveLocalState(state: AppState) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     }
   } catch {
+    // localStorage can fail in sandbox/private contexts.
   }
 }
 
-function getTaskActualComplete(project: Project, task: Task): number {
-  const appliedQty = project.dailyEntries.reduce((acc, entry) => {
-    if (!entry.applied || entry.taskId !== task.id) return acc;
-    return acc + safeNonNegativeNumber(entry.qty, 0);
-  }, 0);
-  return safeNonNegativeNumber(task.completeQty, 0) + appliedQty;
+function getSupabaseClient(): SupabaseClient | null {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true },
+  });
 }
 
-function getWeatherFactor(project: Project): number {
-  if (!project.settings.useWeatherInProjection || project.weather.length === 0) return 1;
-  return avg(project.weather.map((day) => weatherMeta(day.type).factor)) || 1;
+async function loadRemoteState(client: SupabaseClient): Promise<AppState | null> {
+  const { data, error } = await client
+    .from("app_state")
+    .select("id,payload,updated_at")
+    .eq("id", SHARED_STATE_ROW_ID)
+    .maybeSingle<SharedStateRow>();
+  if (error) throw error;
+  if (!data?.payload) return null;
+  return sanitizeState(data.payload);
 }
 
-function getWeatherFactorByDate(project: Project, date: string): number {
-  const match = project.weather.find((day) => day.date === date);
-  return match ? weatherMeta(match.type).factor : 1;
+async function saveRemoteState(client: SupabaseClient, state: AppState): Promise<void> {
+  const { error } = await client
+    .from("app_state")
+    .upsert({ id: SHARED_STATE_ROW_ID, payload: sanitizeState(state) });
+  if (error) throw error;
 }
 
-function getProjectTrailingEntries(project: Project): DailyEntry[] {
-  return [...project.dailyEntries]
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .filter((entry) => isWorkday(entry.date))
-    .slice(-project.settings.trailingDays);
+function getTaskAppliedQty(project: Project, taskId: string): number {
+  return sum(
+    project.dailyEntries
+      .filter((entry) => entry.applied && entry.taskId === taskId)
+      .map((entry) => safeNonNegativeNumber(entry.qty, 0)),
+  );
+}
+
+function getTaskCompleteQty(project: Project, task: Task): number {
+  return safeNonNegativeNumber(task.baselineCompleteQty, 0) + getTaskAppliedQty(project, task.id);
 }
 
 function getTaskTrailingEntries(project: Project, taskId: string): DailyEntry[] {
   return [...project.dailyEntries]
     .sort((a, b) => a.date.localeCompare(b.date))
-    .filter((entry) => entry.taskId === taskId && isWorkday(entry.date))
+    .filter((entry) => entry.applied && entry.taskId === taskId && isWorkday(entry.date))
     .slice(-project.settings.trailingDays);
 }
 
-function getRecentRateFromEntries(entries: DailyEntry[]): number {
+function getProjectTrailingEntries(project: Project): DailyEntry[] {
+  return [...project.dailyEntries]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .filter((entry) => entry.applied && isWorkday(entry.date))
+    .slice(-project.settings.trailingDays);
+}
+
+function getRecentRate(entries: DailyEntry[]): number {
   return avg(entries.map((entry) => safeNonNegativeNumber(entry.qty, 0)));
 }
 
-function getRecentHeadcountFromEntries(entries: DailyEntry[]): number {
+function getRecentHeadcount(entries: DailyEntry[]): number {
   return avg(entries.map((entry) => safeNonNegativeNumber(entry.headcount, 0)).filter((value) => value > 0));
 }
 
@@ -558,108 +435,145 @@ function getRecentProductivityPerPerson(entries: DailyEntry[]): number {
   return headcount > 0 ? qty / headcount : 0;
 }
 
-function getEffectiveProductivityPerPerson(project: Project, task: Task) {
-  const recentActual = getRecentProductivityPerPerson(getTaskTrailingEntries(project, task.id));
-  return {
-    value: recentActual > 0 ? recentActual : Math.max(task.targetProductivityPerPerson, 0.01),
-    usingReality: recentActual > 0,
-  };
+function getWeatherFactorByDate(project: Project, date: string): number {
+  if (!project.settings.useWeatherInProjection) return 1;
+  const match = project.weather.find((day) => day.date === date);
+  return match ? weatherMeta(match.type).factor : 1;
+}
+
+function forecastFinishDate(args: {
+  startDate: string;
+  targetFinish: string;
+  remainingQty: number;
+  dailyRate: number;
+  project: Project;
+}) {
+  const { startDate, targetFinish, remainingQty, dailyRate, project } = args;
+  if (remainingQty <= 0) return { projectedFinish: startDate, adjustedAverageRate: dailyRate, slipDays: 0 };
+  if (dailyRate <= 0) return { projectedFinish: null as string | null, adjustedAverageRate: 0, slipDays: 0 };
+
+  let cursor = startDate;
+  let remaining = remainingQty;
+  let daysUsed = 0;
+  let adjustedOutputTotal = 0;
+  const maxDays = 365;
+
+  while (remaining > 0 && daysUsed < maxDays) {
+    if (isWorkday(cursor)) {
+      const adjustedOutput = dailyRate * getWeatherFactorByDate(project, cursor);
+      remaining -= adjustedOutput;
+      adjustedOutputTotal += adjustedOutput;
+      daysUsed += 1;
+    }
+    if (remaining > 0) cursor = addDays(cursor, 1);
+  }
+
+  const projectedFinish = daysUsed >= maxDays ? null : cursor;
+  const adjustedAverageRate = daysUsed > 0 ? adjustedOutputTotal / daysUsed : dailyRate;
+  const slipDays = projectedFinish ? Math.max(0, workdaysBetween(targetFinish, projectedFinish) - 1) : 0;
+  return { projectedFinish, adjustedAverageRate, slipDays };
 }
 
 function getProjectMetrics(project: Project) {
-  const plannedQty = project.tasks.reduce((acc, task) => acc + safeNonNegativeNumber(task.plannedQty, 0), 0);
-  const completeQty = project.tasks.reduce((acc, task) => acc + getTaskActualComplete(project, task), 0);
+  const plannedQty = sum(project.tasks.map((task) => safeNonNegativeNumber(task.plannedQty, 0)));
+  const completeQty = sum(project.tasks.map((task) => getTaskCompleteQty(project, task)));
   const remainingQty = Math.max(0, plannedQty - completeQty);
-  const recentRate = getRecentRateFromEntries(getProjectTrailingEntries(project));
-  const adjustedRate = recentRate * getWeatherFactor(project);
+  const recentRate = getRecentRate(getProjectTrailingEntries(project));
+  const forecast = forecastFinishDate({
+    startDate: todayISO(),
+    targetFinish: project.targetFinish,
+    remainingQty,
+    dailyRate: recentRate,
+    project,
+  });
   const workdaysRemaining = workdaysBetween(todayISO(), project.targetFinish);
   const requiredDailyRate = workdaysRemaining > 0 ? remainingQty / workdaysRemaining : remainingQty;
-  const workdaysToFinish = adjustedRate > 0 ? Math.ceil(remainingQty / adjustedRate) : 0;
-  const projectedFinish = adjustedRate > 0 ? addWorkdays(todayISO(), Math.max(0, workdaysToFinish - 1)) : null;
-  const finishSlipDays = projectedFinish ? Math.max(0, workdaysBetween(project.targetFinish, projectedFinish) - 1) : 0;
   const percentComplete = plannedQty > 0 ? (completeQty / plannedQty) * 100 : 0;
   return {
     plannedQty,
     completeQty,
     remainingQty,
     recentRate,
-    adjustedRate,
+    adjustedRate: forecast.adjustedAverageRate,
     requiredDailyRate,
-    projectedFinish,
-    finishSlipDays,
+    projectedFinish: forecast.projectedFinish,
+    finishSlipDays: forecast.slipDays,
     percentComplete,
   };
 }
 
 function getTaskMetrics(project: Project, task: Task) {
-  const trailingEntries = getTaskTrailingEntries(project, task.id);
-  const completeQty = getTaskActualComplete(project, task);
-  const remainingQty = Math.max(0, safeNonNegativeNumber(task.plannedQty, 0) - completeQty);
-  const recentRate = getRecentRateFromEntries(trailingEntries);
-  const recentHeadcount = getRecentHeadcountFromEntries(trailingEntries);
-  const productivity = getEffectiveProductivityPerPerson(project, task);
+  const entries = getTaskTrailingEntries(project, task.id);
+  const completeQty = getTaskCompleteQty(project, task);
+  const remainingQty = Math.max(0, task.plannedQty - completeQty);
+  const recentRate = getRecentRate(entries);
+  const recentHeadcount = getRecentHeadcount(entries);
+  const recentProductivity = getRecentProductivityPerPerson(entries);
+  const productivityPerPerson = recentProductivity > 0 ? recentProductivity : Math.max(task.targetProductivityPerPerson, 0.01);
+  const usingReality = recentProductivity > 0;
   const workdaysRemaining = workdaysBetween(todayISO(), task.targetFinish);
   const requiredDailyRate = workdaysRemaining > 0 ? remainingQty / workdaysRemaining : remainingQty;
-  const requiredHeadcount = productivity.value > 0 ? requiredDailyRate / productivity.value : 0;
-  const adjustedRate = recentRate * getWeatherFactor(project);
-  const workdaysToFinish = adjustedRate > 0 ? Math.ceil(remainingQty / adjustedRate) : 0;
-  const projectedFinish = adjustedRate > 0 ? addWorkdays(todayISO(), Math.max(0, workdaysToFinish - 1)) : null;
-  const slipDays = projectedFinish ? Math.max(0, workdaysBetween(task.targetFinish, projectedFinish) - 1) : 0;
+  const requiredHeadcount = productivityPerPerson > 0 ? requiredDailyRate / productivityPerPerson : 0;
+  const forecast = forecastFinishDate({
+    startDate: todayISO(),
+    targetFinish: task.targetFinish,
+    remainingQty,
+    dailyRate: recentRate,
+    project,
+  });
   return {
     completeQty,
     remainingQty,
     recentRate,
     recentHeadcount,
-    adjustedRate,
+    adjustedRate: forecast.adjustedAverageRate,
     requiredDailyRate,
     requiredHeadcount,
-    projectedFinish,
-    slipDays,
-    productivityPerPerson: productivity.value,
-    usingReality: productivity.usingReality,
+    projectedFinish: forecast.projectedFinish,
+    slipDays: forecast.slipDays,
+    productivityPerPerson,
+    usingReality,
   };
 }
 
-function buildTaskChartData(project: Project, task: Task): TaskChartPoint[] {
-  const trailingEntries = getTaskTrailingEntries(project, task.id);
-  const historyDates = getPreviousWorkdays(todayISO(), HISTORY_WORKDAYS);
-  const forecastDates = getNextWorkdays(todayISO(), FORECAST_WORKDAYS);
+function buildTaskChartData(project: Project, task: Task) {
+  const taskEntries = getTaskTrailingEntries(project, task.id);
+  const pastDates = getNextWorkdays(addDays(todayISO(), -14), 10)
+    .filter((date) => date <= todayISO())
+    .slice(-5);
+  const futureDates = getNextWorkdays(todayISO(), 15);
   const metrics = getTaskMetrics(project, task);
-  const recentTrendHeadcount = metrics.recentHeadcount > 0 ? metrics.recentHeadcount : metrics.requiredHeadcount;
   let projectedRemaining = metrics.remainingQty;
 
-  const history: TaskChartPoint[] = historyDates.map((date) => {
-    const entry = trailingEntries.find((item) => item.date === date);
+  const history = pastDates.map((date) => {
+    const entry = taskEntries.find((item) => item.date === date);
     return {
       date,
       label: date.slice(5),
       actualQty: entry ? entry.qty : 0,
-      requiredQty: null,
-      trendQty: null,
       actualHeadcount: entry ? entry.headcount : 0,
-      requiredHeadcount: null,
-      trendHeadcount: null,
+      requiredQty: null as number | null,
+      trendQty: null as number | null,
+      requiredHeadcount: null as number | null,
     };
   });
 
-  const forecast: TaskChartPoint[] = forecastDates.map((date) => {
+  const forecast = futureDates.map((date) => {
     const weatherFactor = getWeatherFactorByDate(project, date);
-    const remainingWorkdaysFromDate = Math.max(1, workdaysBetween(date, task.targetFinish));
-    const requiredQty = projectedRemaining > 0 ? projectedRemaining / remainingWorkdaysFromDate : 0;
+    const workdaysLeft = Math.max(1, workdaysBetween(date, task.targetFinish));
+    const requiredQty = projectedRemaining > 0 ? projectedRemaining / workdaysLeft : 0;
     const trendQty = projectedRemaining > 0 ? Math.min(projectedRemaining, metrics.recentRate * weatherFactor) : 0;
     const requiredHeadcount = metrics.productivityPerPerson > 0 ? requiredQty / metrics.productivityPerPerson : 0;
-    const point: TaskChartPoint = {
+    projectedRemaining = Math.max(0, projectedRemaining - trendQty);
+    return {
       date,
       label: date.slice(5),
-      actualQty: null,
+      actualQty: null as number | null,
+      actualHeadcount: null as number | null,
       requiredQty,
       trendQty,
-      actualHeadcount: null,
       requiredHeadcount,
-      trendHeadcount: recentTrendHeadcount,
     };
-    projectedRemaining = Math.max(0, projectedRemaining - trendQty);
-    return point;
   });
 
   return [...history, ...forecast];
@@ -669,13 +583,13 @@ async function fetchWeatherForLocation(location: string): Promise<WeatherDay[]> 
   if (!location.trim()) return buildDefaultWeather();
   const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1&language=en&format=json`;
   const geoRes = await fetch(geoUrl);
-  if (!geoRes.ok) throw new Error("Unable to geocode location");
+  if (!geoRes.ok) throw new Error("Unable to geocode location.");
   const geoJson = await geoRes.json();
   const result = geoJson?.results?.[0];
-  if (!result) throw new Error("Location not found");
+  if (!result) throw new Error("Location not found.");
   const forecastUrl = `https://api.open-meteo.com/v1/forecast?latitude=${result.latitude}&longitude=${result.longitude}&daily=weathercode&timezone=auto&forecast_days=16`;
   const forecastRes = await fetch(forecastUrl);
-  if (!forecastRes.ok) throw new Error("Unable to load weather forecast");
+  if (!forecastRes.ok) throw new Error("Unable to load weather forecast.");
   const forecastJson = await forecastRes.json();
   const dates: string[] = forecastJson?.daily?.time || [];
   const codes: number[] = forecastJson?.daily?.weathercode || [];
@@ -688,54 +602,53 @@ async function fetchWeatherForLocation(location: string): Promise<WeatherDay[]> 
       date,
       type: weatherCodeToType(index >= 0 ? codes[index] : 0),
       note: "",
-      source: "api" as const,
+      source: "api",
     };
   });
 }
 
-function runSelfChecks() {
+function runSelfTests() {
+  if (readEnvValue("THIS_ENV_KEY_SHOULD_NOT_EXIST") !== undefined) {
+    throw new Error("Self-test failed: env fallback");
+  }
+  if (workdaysBetween("2026-04-20", "2026-04-24") !== 5) {
+    throw new Error("Self-test failed: workdaysBetween");
+  }
+  if (addWorkdays("2026-04-25", 1) !== "2026-04-27") {
+    throw new Error("Self-test failed: addWorkdays");
+  }
+
   const state = buildDefaultState();
   const project = state.projects[0];
   const task = project.tasks[0];
-  const sanitized = sanitizeState({
-    users: [{ id: "u1", name: "A", role: "Admin" }],
-    projects: [{ id: "p1", tasks: [{ id: "t1", plannedQty: "abc", completeQty: -10, targetProductivityPerPerson: "bad" }], dailyEntries: [{ id: "d1", qty: Infinity, headcount: -4 }], settings: { trailingDays: -2 } }],
-  });
-  const appliedProject: Project = {
+  const testProject: Project = {
     ...project,
-    dailyEntries: [{ id: "e1", date: todayISO(), taskId: task.id, qty: 100, headcount: 10, note: "", applied: true }],
+    settings: { ...project.settings, trailingDays: 10 },
+    dailyEntries: [
+      { id: "entry-1", date: "2026-04-20", taskId: task.id, qty: 100, headcount: 10, note: "", applied: true },
+      { id: "entry-2", date: "2026-04-21", taskId: task.id, qty: 999, headcount: 20, note: "", applied: false },
+      { id: "entry-3", date: "2026-04-22", taskId: null, qty: 50, headcount: 5, note: "", applied: true },
+      { id: "entry-4", date: "2026-04-23", taskId: null, qty: 500, headcount: 5, note: "", applied: false },
+    ],
   };
-  const fallbackState = sanitizeState(null);
-  const entryOnlyProject: Project = {
-    ...project,
-    dailyEntries: [{ id: "e2", date: todayISO(), taskId: null, qty: 100, headcount: 10, note: "", applied: true }],
-  };
-
-  if (workdaysBetween("2026-04-21", "2026-04-25") !== 5) throw new Error("Self-check failed: workdaysBetween");
-  if (addWorkdays("2026-04-25", 1) !== "2026-04-27") throw new Error("Self-check failed: addWorkdays");
-  if (sanitized.projects[0].tasks[0].plannedQty !== 0) throw new Error("Self-check failed: sanitize planned qty");
-  if (sanitized.projects[0].dailyEntries[0].headcount !== 0) throw new Error("Self-check failed: sanitize headcount");
-  if (getTaskActualComplete(appliedProject, task) !== 2450) throw new Error("Self-check failed: task actual complete");
-  if (getTaskActualComplete(entryOnlyProject, task) !== 2350) throw new Error("Self-check failed: task complete ignores project-level entries");
-  if (buildTaskChartData(project, task).length !== HISTORY_WORKDAYS + FORECAST_WORKDAYS) throw new Error("Self-check failed: chart data length");
-  if (buildDefaultWeather().length !== 10) throw new Error("Self-check failed: default weather count");
-  if (fallbackState.projects.length === 0 || fallbackState.users.length === 0) throw new Error("Self-check failed: fallback state");
-  if (weatherMeta("unknown").value !== "clear") throw new Error("Self-check failed: weather fallback");
+  if (getTaskCompleteQty(testProject, task) !== task.baselineCompleteQty + 100) {
+    throw new Error("Self-test failed: applied entries only");
+  }
+  if (getTaskTrailingEntries(testProject, task.id).length !== 1) {
+    throw new Error("Self-test failed: task trailing entries");
+  }
+  if (getProjectTrailingEntries(testProject).length !== 2) {
+    throw new Error("Self-test failed: project trailing entries");
+  }
+  if (sanitizeState({ users: [], projects: [] }).users.length !== 0) {
+    throw new Error("Self-test failed: preserve empty arrays");
+  }
 }
 
-if (typeof import.meta !== "undefined" && import.meta.env?.DEV) {
-  runSelfChecks();
-}
-
-function Badge({ children, tone = "slate" }: { children: React.ReactNode; tone?: Tone }) {
-  const tones: Record<Tone, string> = {
-    slate: "bg-slate-100 text-slate-700 border-slate-200",
-    green: "bg-emerald-100 text-emerald-700 border-emerald-200",
-    amber: "bg-amber-100 text-amber-700 border-amber-200",
-    red: "bg-red-100 text-red-700 border-red-200",
-    blue: "bg-blue-100 text-blue-700 border-blue-200",
-  };
-  return <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${tones[tone]}`}>{children}</span>;
+try {
+  runSelfTests();
+} catch (error) {
+  console.error(error);
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -749,13 +662,21 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
   const { className = "", ...rest } = props;
-  return <input {...rest} className={`w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 ${className}`} />;
+  return (
+    <input
+      {...rest}
+      className={`w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 disabled:bg-slate-100 disabled:text-slate-500 ${className}`}
+    />
+  );
 }
 
 function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   const { className = "", children, ...rest } = props;
   return (
-    <select {...rest} className={`w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 ${className}`}>
+    <select
+      {...rest}
+      className={`w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 disabled:bg-slate-100 disabled:text-slate-500 ${className}`}
+    >
       {children}
     </select>
   );
@@ -763,11 +684,78 @@ function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
 
 function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
   const { className = "", ...rest } = props;
-  return <textarea {...rest} className={`min-h-[90px] w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 ${className}`} />;
+  return (
+    <textarea
+      {...rest}
+      className={`min-h-[90px] w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 disabled:bg-slate-100 disabled:text-slate-500 ${className}`}
+    />
+  );
 }
 
-function Stat({ label, value, sub, tone = "slate" }: { label: string; value: string; sub?: string; tone?: Tone }) {
-  const toneMap: Record<Tone, string> = {
+function Button({
+  children,
+  onClick,
+  disabled,
+  danger,
+  secondary,
+  type = "button",
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  secondary?: boolean;
+  type?: "button" | "submit";
+}) {
+  const base = "rounded-2xl px-4 py-2 text-sm font-medium transition";
+  let style = "bg-slate-900 text-white hover:bg-slate-700";
+  if (secondary) style = "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50";
+  if (danger) style = "bg-red-600 text-white hover:bg-red-700";
+  if (disabled) style = "cursor-not-allowed border border-slate-200 bg-white text-slate-400";
+  return (
+    <button type={type} onClick={onClick} disabled={disabled} className={`${base} ${style}`}>
+      {children}
+    </button>
+  );
+}
+
+function Card({
+  title,
+  subtitle,
+  action,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
+          {subtitle ? <p className="text-sm text-slate-500">{subtitle}</p> : null}
+        </div>
+        {action}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  sub,
+  tone = "slate",
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: "slate" | "green" | "amber" | "red" | "blue";
+}) {
+  const colors = {
     slate: "text-slate-900",
     green: "text-emerald-700",
     amber: "text-amber-700",
@@ -777,122 +765,204 @@ function Stat({ label, value, sub, tone = "slate" }: { label: string; value: str
   return (
     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
       <div className="text-sm text-slate-500">{label}</div>
-      <div className={`mt-1 text-2xl font-semibold ${toneMap[tone]}`}>{value}</div>
+      <div className={`mt-1 text-2xl font-semibold ${colors[tone]}`}>{value}</div>
       {sub ? <div className="mt-1 text-xs text-slate-500">{sub}</div> : null}
     </div>
   );
 }
 
+function Badge({
+  children,
+  tone = "slate",
+}: {
+  children: React.ReactNode;
+  tone?: "slate" | "green" | "amber" | "red" | "blue";
+}) {
+  const colors = {
+    slate: "bg-slate-100 text-slate-700 border-slate-200",
+    green: "bg-emerald-100 text-emerald-700 border-emerald-200",
+    amber: "bg-amber-100 text-amber-700 border-amber-200",
+    red: "bg-red-100 text-red-700 border-red-200",
+    blue: "bg-blue-100 text-blue-700 border-blue-200",
+  };
+  return (
+    <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-medium ${colors[tone]}`}>
+      {children}
+    </span>
+  );
+}
+
 function ProgressBar({ value }: { value: number }) {
+  const width = Math.min(100, Math.max(0, value));
   return (
     <div className="h-3 w-full overflow-hidden rounded-full bg-slate-200">
-      <div className="h-full rounded-full bg-slate-800" style={{ width: `${clamp(value, 0, 100)}%` }} />
+      <div className="h-full rounded-full bg-slate-900" style={{ width: `${width}%` }} />
     </div>
   );
 }
 
-function Card({ title, subtitle, icon: Icon, action, children }: { title: string; subtitle?: string; icon?: React.ComponentType<{ className?: string }>; action?: React.ReactNode; children: React.ReactNode }) {
+function AuthScreen(props: {
+  loading: boolean;
+  mode: "signin" | "signup";
+  setMode: React.Dispatch<React.SetStateAction<"signin" | "signup">>;
+  email: string;
+  setEmail: React.Dispatch<React.SetStateAction<string>>;
+  password: string;
+  setPassword: React.Dispatch<React.SetStateAction<string>>;
+  onSubmit: () => Promise<void>;
+  message: string;
+}) {
+  const { loading, mode, setMode, email, setEmail, password, setPassword, onSubmit, message } = props;
   return (
-    <div className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-      <div className="mb-4 flex items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          {Icon ? <Icon className="mt-0.5 h-5 w-5 text-slate-500" /> : null}
-          <div>
-            <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
-            {subtitle ? <p className="text-sm text-slate-500">{subtitle}</p> : null}
-          </div>
+    <div className="min-h-screen bg-slate-100 px-4 py-10 text-slate-900">
+      <div className="mx-auto max-w-md rounded-3xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+        <div className="mb-6">
+          <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Power Progress</div>
+          <h1 className="mt-2 text-3xl font-semibold">Solar Tracker Login</h1>
+          <p className="mt-2 text-sm text-slate-500">Sign in with your approved email and password.</p>
         </div>
-        {action}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function WeatherCard({ day, projectId, updateProject }: { day: WeatherDay; projectId: string; updateProject: (projectId: string, updater: (project: Project) => Project) => void }) {
-  return (
-    <div className="grid gap-3 rounded-3xl border border-slate-200 p-4 md:grid-cols-[1fr,1fr,1.2fr,1fr] md:items-end">
-      <Field label="Date">
-        <Input type="date" value={day.date} onChange={(e) => updateProject(projectId, (project) => ({ ...project, weather: project.weather.map((item) => (item.id === day.id ? { ...item, date: e.target.value } : item)) }))} />
-      </Field>
-      <Field label="Condition">
-        <Select value={day.type} onChange={(e) => updateProject(projectId, (project) => ({ ...project, weather: project.weather.map((item) => (item.id === day.id ? { ...item, type: e.target.value as WeatherType, source: "manual" } : item)) }))}>
-          {WEATHER_TYPES.map((type) => (
-            <option key={type.value} value={type.value}>
-              {type.label} ({type.factor}x)
-            </option>
-          ))}
-        </Select>
-      </Field>
-      <div className="rounded-2xl border border-slate-200 px-3 py-2.5">
-        <div className="text-sm text-slate-500">Impact factor</div>
-        <div className="mt-1 text-lg font-semibold">{weatherMeta(day.type).factor}x</div>
-        <div className="text-xs text-slate-500">{day.source === "api" ? "From location forecast" : "Manual override"}</div>
-      </div>
-      <Field label="Note">
-        <Input value={day.note} onChange={(e) => updateProject(projectId, (project) => ({ ...project, weather: project.weather.map((item) => (item.id === day.id ? { ...item, note: e.target.value } : item)) }))} />
-      </Field>
-    </div>
-  );
-}
-
-function TaskTrendChart({ task, chartData, metrics }: { task: Task; chartData: TaskChartPoint[]; metrics: ReturnType<typeof getTaskMetrics> }) {
-  return (
-    <div className="rounded-3xl border border-slate-200 p-4">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="text-lg font-semibold text-slate-900">{task.name}</div>
-          <div className="text-sm text-slate-500">3-week workday tracker • {task.category}</div>
+        <div className="mb-4 flex gap-2">
+          <Button secondary={mode !== "signin"} onClick={() => setMode("signin")}>
+            Sign in
+          </Button>
+          <Button secondary={mode !== "signup"} onClick={() => setMode("signup")}>
+            Create account
+          </Button>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Badge tone={metrics.slipDays > 0 ? "red" : "green"}>{metrics.slipDays > 0 ? `${metrics.slipDays} workdays late` : "On track"}</Badge>
-          <Badge tone={metrics.usingReality ? "blue" : "amber"}>{metrics.usingReality ? "Using actual productivity" : "Using target productivity"}</Badge>
+        <div className="space-y-4">
+          <Field label="Email">
+            <Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+          </Field>
+          <Field label="Password">
+            <Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+          </Field>
+          <Button disabled={loading || !email || !password} onClick={() => void onSubmit()}>
+            {loading ? "Working..." : mode === "signin" ? "Sign in" : "Create account"}
+          </Button>
+          {message ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              {message}
+            </div>
+          ) : null}
         </div>
-      </div>
-      <div className="mb-4 grid gap-3 md:grid-cols-5">
-        <Stat label="Complete" value={fmt(metrics.completeQty)} sub={task.unit} />
-        <Stat label="Remaining" value={fmt(metrics.remainingQty)} sub={task.unit} />
-        <Stat label="Required/day" value={fmt(metrics.requiredDailyRate, 1)} sub={task.unit} tone="amber" />
-        <Stat label="People needed/day" value={fmt(metrics.requiredHeadcount, 1)} sub="to hit schedule" tone="blue" />
-        <Stat label="Projected finish" value={metrics.projectedFinish || "—"} sub={`Target ${task.targetFinish}`} tone={metrics.slipDays > 0 ? "red" : "green"} />
-      </div>
-      <div className="h-[320px] w-full">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={chartData} margin={{ top: 10, right: 16, left: 0, bottom: 8 }}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey="label" />
-            <YAxis yAxisId="qty" />
-            <YAxis yAxisId="people" orientation="right" />
-            <Tooltip />
-            <Legend />
-            <ReferenceLine yAxisId="qty" y={metrics.requiredDailyRate} strokeDasharray="4 4" />
-            <Bar yAxisId="qty" dataKey="actualQty" name="Actual qty" />
-            <Bar yAxisId="qty" dataKey="requiredQty" name="Required qty" />
-            <Line yAxisId="qty" type="monotone" dataKey="trendQty" name="Current pace forecast" dot={false} />
-            <Line yAxisId="people" type="monotone" dataKey="requiredHeadcount" name="Required people" dot={false} />
-            <Line yAxisId="people" type="monotone" dataKey="trendHeadcount" name="Current people pace" dot={false} />
-            <Line yAxisId="people" type="monotone" dataKey="actualHeadcount" name="Actual people" dot={false} />
-          </ComposedChart>
-        </ResponsiveContainer>
       </div>
     </div>
   );
 }
 
 function AppShell() {
-  const [data, setData] = useState<AppState>(() => loadState());
+  const [data, setData] = useState<AppState>(() => loadLocalState());
+  const [session, setSession] = useState<Session | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
+  const [remoteReady, setRemoteReady] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("dashboard");
-  const [weatherLoading, setWeatherLoading] = useState(false);
-  const [weatherError, setWeatherError] = useState("");
   const [syncMessage, setSyncMessage] = useState("Using local browser storage");
   const [syncing, setSyncing] = useState(false);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [weatherError, setWeatherError] = useState("");
+  const supabaseRef = useRef<SupabaseClient | null>(getSupabaseClient());
   const mountedRef = useRef(false);
+  const lastSavedJsonRef = useRef("");
 
   useEffect(() => {
-    if (activeProjectId === null && data.projects.length > 0) {
-      setActiveProjectId(data.projects[0].id);
+    const client = supabaseRef.current;
+    if (!client) {
+      setAuthChecked(true);
+      setRemoteReady(true);
+      return;
     }
+    client.auth.getSession().then(({ data: authData }) => {
+      setSession(authData.session ?? null);
+      setAuthChecked(true);
+    });
+    const { data: listener } = client.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession ?? null);
+      setAuthChecked(true);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  const currentEmail = session?.user?.email?.toLowerCase() || "";
+  const hasConfiguredEmails = data.users.some((user) => user.email.trim().length > 0);
+  const currentUser = data.users.find((user) => user.email.toLowerCase() === currentEmail);
+  const currentRole: UserRole = supabaseRef.current
+    ? !hasConfiguredEmails
+      ? "Admin"
+      : currentUser?.role || "Viewer"
+    : "Admin";
+  const isAdmin = currentRole === "Admin";
+  const canEdit = currentRole === "Admin" || currentRole === "Editor";
+
+  useEffect(() => {
+    let cancelled = false;
+    const client = supabaseRef.current;
+    if (!client) {
+      setSyncMessage("Using local browser storage");
+      setRemoteReady(true);
+      return;
+    }
+    if (!session) {
+      setRemoteReady(false);
+      return;
+    }
+    setSyncMessage("Connecting to shared database...");
+    loadRemoteState(client)
+      .then((remoteState) => {
+        if (cancelled) return;
+        if (remoteState) {
+          setData(remoteState);
+          saveLocalState(remoteState);
+          lastSavedJsonRef.current = JSON.stringify(remoteState);
+          setSyncMessage("Connected to shared database");
+        } else {
+          const initial = loadLocalState();
+          return saveRemoteState(client, initial).then(() => {
+            if (cancelled) return;
+            lastSavedJsonRef.current = JSON.stringify(initial);
+            setSyncMessage("Shared database initialized");
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSyncMessage("Shared database unavailable, using local storage");
+      })
+      .finally(() => {
+        if (!cancelled) setRemoteReady(true);
+      });
+
+    const channel = client
+      .channel("shared-app-state")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "app_state", filter: `id=eq.${SHARED_STATE_ROW_ID}` },
+        (payload) => {
+          const incoming = payload.new as SharedStateRow | undefined;
+          if (!incoming?.payload) return;
+          const sanitized = sanitizeState(incoming.payload);
+          const incomingJson = JSON.stringify(sanitized);
+          if (incomingJson === lastSavedJsonRef.current) return;
+          lastSavedJsonRef.current = incomingJson;
+          setData(sanitized);
+          saveLocalState(sanitized);
+          setSyncMessage("Synced from shared database");
+        },
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      client.removeChannel(channel);
+    };
+  }, [session]);
+
+  useEffect(() => {
+    if (activeProjectId === null && data.projects.length > 0) setActiveProjectId(data.projects[0].id);
   }, [activeProjectId, data.projects]);
 
   useEffect(() => {
@@ -906,38 +976,96 @@ function AppShell() {
       mountedRef.current = true;
       return;
     }
-    setSyncing(true);
     saveLocalState(data);
-    setSyncMessage("Saved locally in this browser");
-    const timer = window.setTimeout(() => setSyncing(false), 250);
-    return () => window.clearTimeout(timer);
-  }, [data]);
+    const json = JSON.stringify(data);
+    if (json === lastSavedJsonRef.current) {
+      setSyncing(false);
+      return;
+    }
+    const client = supabaseRef.current;
+    if (!client || !remoteReady || !session) {
+      lastSavedJsonRef.current = json;
+      setSyncMessage("Saved locally in this browser");
+      setSyncing(false);
+      return;
+    }
+    let cancelled = false;
+    setSyncing(true);
+    saveRemoteState(client, data)
+      .then(() => {
+        if (cancelled) return;
+        lastSavedJsonRef.current = json;
+        setSyncMessage("Saved to shared database");
+      })
+      .catch(() => {
+        if (!cancelled) setSyncMessage("Shared save failed, kept local copy");
+      })
+      .finally(() => {
+        if (!cancelled) window.setTimeout(() => setSyncing(false), 250);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [data, remoteReady, session]);
 
-  const activeProject = useMemo(() => data.projects.find((project) => project.id === activeProjectId) || data.projects[0] || null, [data.projects, activeProjectId]);
-  const projectMetrics = useMemo(() => (activeProject ? getProjectMetrics(activeProject) : null), [activeProject]);
+  const activeProject = useMemo(
+    () => data.projects.find((project) => project.id === activeProjectId) || data.projects[0] || null,
+    [data.projects, activeProjectId],
+  );
 
-  const updateProject = (projectId: string, updater: (project: Project) => Project) => {
+  const projectMetrics = useMemo(
+    () => (activeProject ? getProjectMetrics(activeProject) : null),
+    [activeProject],
+  );
+
+  function updateProject(projectId: string, updater: (project: Project) => Project) {
+    if (!canEdit) return;
     setData((prev) => ({
       ...prev,
       projects: prev.projects.map((project) => (project.id === projectId ? updater(project) : project)),
     }));
-  };
+  }
 
-  const refreshWeather = async () => {
-    if (!activeProject) return;
-    setWeatherLoading(true);
-    setWeatherError("");
-    try {
-      const weather = await fetchWeatherForLocation(activeProject.location);
-      updateProject(activeProject.id, (project) => ({ ...project, weather }));
-    } catch (error: any) {
-      setWeatherError(error?.message || "Unable to update weather");
-    } finally {
-      setWeatherLoading(false);
+  async function handleAuthSubmit() {
+    const client = supabaseRef.current;
+    if (!client) {
+      setAuthMessage(
+        "Supabase auth is not configured yet. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to enable login, or use local mode without them.",
+      );
+      return;
     }
-  };
+    setAuthLoading(true);
+    setAuthMessage("");
+    try {
+      if (authMode === "signup") {
+        const { error } = await client.auth.signUp({
+          email: authEmail,
+          password: authPassword,
+          options: AUTH_REDIRECT_URL ? { emailRedirectTo: AUTH_REDIRECT_URL } : undefined,
+        });
+        if (error) throw error;
+        setAuthMessage("Account created. Check your email if confirmation is required, then sign in.");
+        setAuthMode("signin");
+      } else {
+        const { error } = await client.auth.signInWithPassword({ email: authEmail, password: authPassword });
+        if (error) throw error;
+        setAuthMessage("");
+      }
+    } catch (error: any) {
+      setAuthMessage(error?.message || "Authentication failed.");
+    } finally {
+      setAuthLoading(false);
+    }
+  }
 
-  const addProject = () => {
+  async function handleSignOut() {
+    const client = supabaseRef.current;
+    if (!client) return;
+    await client.auth.signOut();
+  }
+
+  function addProject() {
+    if (!canEdit) return;
     const newProject: Project = {
       id: uid(),
       name: `New Solar Project ${data.projects.length + 1}`,
@@ -953,9 +1081,10 @@ function AppShell() {
     setData((prev) => ({ ...prev, projects: [...prev.projects, newProject] }));
     setActiveProjectId(newProject.id);
     setTab("dashboard");
-  };
+  }
 
-  const removeProject = (projectId: string) => {
+  function removeProject(projectId: string) {
+    if (!isAdmin) return;
     setData((prev) => {
       const remainingProjects = prev.projects.filter((project) => project.id !== projectId);
       return {
@@ -963,31 +1092,10 @@ function AppShell() {
         projects: remainingProjects.length > 0 ? remainingProjects : [buildDefaultState().projects[0]],
       };
     });
-  };
+  }
 
-  const addUser = () => {
-    setData((prev) => ({
-      ...prev,
-      users: [...prev.users, { id: uid(), name: `User ${prev.users.length + 1}`, role: "Editor" }],
-    }));
-  };
-
-  const removeUser = (userId: string) => {
-    setData((prev) => ({
-      ...prev,
-      users: prev.users.filter((user) => user.id !== userId),
-      projects: prev.projects.map((project) => ({
-        ...project,
-        tasks: project.tasks.map((task) => ({
-          ...task,
-          assignedUserIds: task.assignedUserIds.filter((id) => id !== userId),
-        })),
-      })),
-    }));
-  };
-
-  const addTask = () => {
-    if (!activeProject) return;
+  function addTask() {
+    if (!activeProject || !canEdit) return;
     updateProject(activeProject.id, (project) => ({
       ...project,
       tasks: [
@@ -996,11 +1104,10 @@ function AppShell() {
           id: uid(),
           name: `New Task ${project.tasks.length + 1}`,
           category: "General",
-          assignedUserIds: [],
           startDate: todayISO(),
           targetFinish: addWorkdays(todayISO(), 10),
           plannedQty: 100,
-          completeQty: 0,
+          baselineCompleteQty: 0,
           unit: "units",
           active: true,
           notes: "",
@@ -1008,44 +1115,109 @@ function AppShell() {
         },
       ],
     }));
-  };
+  }
 
-  const removeTask = (taskId: string) => {
-    if (!activeProject) return;
+  function removeTask(taskId: string) {
+    if (!activeProject || !isAdmin) return;
     updateProject(activeProject.id, (project) => ({
       ...project,
       tasks: project.tasks.filter((task) => task.id !== taskId),
       dailyEntries: project.dailyEntries.filter((entry) => entry.taskId !== taskId),
     }));
-  };
+  }
 
-  const addDailyEntry = () => {
-    if (!activeProject) return;
+  function addDailyEntry() {
+    if (!activeProject || !canEdit) return;
     updateProject(activeProject.id, (project) => ({
       ...project,
-      dailyEntries: [...project.dailyEntries, { id: uid(), date: todayISO(), taskId: project.tasks[0]?.id || null, qty: 0, headcount: 0, note: "", applied: false }],
+      dailyEntries: [
+        ...project.dailyEntries,
+        {
+          id: uid(),
+          date: todayISO(),
+          taskId: project.tasks[0]?.id || null,
+          qty: 0,
+          headcount: 0,
+          note: "",
+          applied: false,
+        },
+      ],
     }));
-  };
+  }
 
-  const removeDailyEntry = (entryId: string) => {
-    if (!activeProject) return;
+  function removeDailyEntry(entryId: string) {
+    if (!activeProject || !canEdit) return;
     updateProject(activeProject.id, (project) => ({
       ...project,
       dailyEntries: project.dailyEntries.filter((entry) => entry.id !== entryId),
     }));
-  };
+  }
 
-  const toggleApplyEntry = (entry: DailyEntry) => {
-    if (!activeProject || !entry.taskId) return;
+  function toggleApplyEntry(entry: DailyEntry) {
+    if (!activeProject || !canEdit) return;
     updateProject(activeProject.id, (project) => ({
       ...project,
-      dailyEntries: project.dailyEntries.map((item) => (item.id === entry.id ? { ...item, applied: !item.applied } : item)),
+      dailyEntries: project.dailyEntries.map((item) =>
+        item.id === entry.id ? { ...item, applied: !item.applied } : item,
+      ),
     }));
-  };
-
-  if (!activeProject || !projectMetrics) {
-    return <div className="p-6">Loading tracker...</div>;
   }
+
+  function addUser() {
+    if (!isAdmin) return;
+    setData((prev) => ({
+      ...prev,
+      users: [...prev.users, { id: uid(), name: `User ${prev.users.length + 1}`, email: "", role: "Editor" }],
+    }));
+  }
+
+  function removeUser(userId: string) {
+    if (!isAdmin) return;
+    setData((prev) => {
+      const userToRemove = prev.users.find((user) => user.id === userId);
+      const adminCount = prev.users.filter((user) => user.role === "Admin").length;
+      if (userToRemove?.role === "Admin" && adminCount <= 1) {
+        alert("You cannot delete the last Admin user.");
+        return prev;
+      }
+      return { ...prev, users: prev.users.filter((user) => user.id !== userId) };
+    });
+  }
+
+  async function refreshWeather() {
+    if (!activeProject || !canEdit) return;
+    setWeatherLoading(true);
+    setWeatherError("");
+    try {
+      const weather = await fetchWeatherForLocation(activeProject.location);
+      updateProject(activeProject.id, (project) => ({ ...project, weather }));
+    } catch (error: any) {
+      setWeatherError(error?.message || "Unable to update weather.");
+    } finally {
+      setWeatherLoading(false);
+    }
+  }
+
+  if (!authChecked) return <div className="p-6">Checking login...</div>;
+
+  if (supabaseRef.current && !session) {
+    return (
+      <AuthScreen
+        loading={authLoading}
+        mode={authMode}
+        setMode={setAuthMode}
+        email={authEmail}
+        setEmail={setAuthEmail}
+        password={authPassword}
+        setPassword={setAuthPassword}
+        onSubmit={handleAuthSubmit}
+        message={authMessage}
+      />
+    );
+  }
+
+  if (!remoteReady) return <div className="p-6">Connecting tracker...</div>;
+  if (!activeProject || !projectMetrics) return <div className="p-6">Loading tracker...</div>;
 
   const recommendation =
     projectMetrics.remainingQty <= 0
@@ -1053,8 +1225,14 @@ function AppShell() {
       : projectMetrics.adjustedRate <= 0
         ? "No production trend detected yet. Enter daily production to generate projections."
         : projectMetrics.finishSlipDays === 0
-          ? `At current adjusted pace, this project is tracking on or ahead of schedule. Maintain at least ${fmt(projectMetrics.requiredDailyRate, 1)} units/day to protect the target finish.`
-          : `At the current adjusted pace, the project is projected to finish ${projectMetrics.finishSlipDays} workday(s) late. Increase average output by about ${fmt(Math.max(0, projectMetrics.requiredDailyRate - projectMetrics.adjustedRate), 1)} units/day to recover the target date.`;
+          ? `At the current adjusted pace, this project is tracking on or ahead of schedule. Maintain at least ${fmt(
+              projectMetrics.requiredDailyRate,
+              1,
+            )} units/day to protect the target finish.`
+          : `At the current adjusted pace, the project is projected to finish ${projectMetrics.finishSlipDays} workday(s) late. Increase average output by about ${fmt(
+              Math.max(0, projectMetrics.requiredDailyRate - projectMetrics.adjustedRate),
+              1,
+            )} units/day to recover the target date.`;
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
@@ -1066,32 +1244,60 @@ function AppShell() {
                 <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Power Progress</div>
                 <div className="text-xl font-semibold">Solar Tracker</div>
               </div>
-              <button onClick={addProject} className="rounded-2xl bg-white/10 p-2 hover:bg-white/20">
-                <PlusIcon className="h-5 w-5" />
+              <button
+                onClick={addProject}
+                disabled={!canEdit}
+                className={`rounded-2xl bg-white/10 px-3 py-2 text-sm hover:bg-white/20 ${
+                  !canEdit ? "cursor-not-allowed opacity-40" : ""
+                }`}
+              >
+                + Project
               </button>
             </div>
+
             <div className="mb-4 rounded-2xl border border-white/10 bg-white/5 p-3">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <DatabaseIcon className="h-4 w-4" />
-                Local mode
-              </div>
+              <div className="text-sm font-medium">{supabaseRef.current ? "Shared database mode" : "Local mode"}</div>
               <div className="mt-1 text-xs text-slate-300">{syncMessage}</div>
               {syncing ? <div className="mt-2 text-xs text-slate-400">Saving changes...</div> : null}
+              {session?.user?.email ? (
+                <div className="mt-2 text-xs text-slate-300">Signed in as {session.user.email}</div>
+              ) : null}
+              <div className="mt-1 text-xs text-slate-300">Access: {currentRole}</div>
+              {supabaseRef.current && session ? (
+                <button
+                  onClick={() => void handleSignOut()}
+                  className="mt-3 rounded-2xl border border-white/10 px-3 py-2 text-xs font-medium text-white hover:bg-white/10"
+                >
+                  Sign out
+                </button>
+              ) : null}
             </div>
+
             <div className="space-y-2">
               {data.projects.map((project) => (
-                <button key={project.id} onClick={() => setActiveProjectId(project.id)} className={`w-full rounded-2xl border px-3 py-3 text-left transition ${project.id === activeProjectId ? "border-white/30 bg-white/10" : "border-white/10 bg-white/5 hover:bg-white/10"}`}>
+                <button
+                  key={project.id}
+                  onClick={() => setActiveProjectId(project.id)}
+                  className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
+                    project.id === activeProjectId
+                      ? "border-white/30 bg-white/10"
+                      : "border-white/10 bg-white/5 hover:bg-white/10"
+                  }`}
+                >
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="font-medium">{project.name}</div>
                       <div className="mt-1 text-xs text-slate-300">{project.location || "No location set"}</div>
                     </div>
-                    {data.projects.length > 1 ? (
-                      <span onClick={(e) => {
-                        e.stopPropagation();
-                        removeProject(project.id);
-                      }} className="rounded-lg p-1 text-slate-300 hover:bg-white/10 hover:text-white">
-                        <Trash2Icon className="h-4 w-4" />
+                    {data.projects.length > 1 && isAdmin ? (
+                      <span
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          removeProject(project.id);
+                        }}
+                        className="rounded-lg px-2 py-1 text-xs text-red-200 hover:bg-white/10"
+                      >
+                        Delete
                       </span>
                     ) : null}
                   </div>
@@ -1101,202 +1307,848 @@ function AppShell() {
           </aside>
 
           <main className="space-y-4">
-            <div className="rounded-3xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                  <div className="flex items-center gap-2 text-sm text-slate-500">
-                    <CheckCircle2Icon className="h-4 w-4" />
-                    Superintendent schedule and production intelligence
-                  </div>
-                  <h1 className="mt-1 text-3xl font-semibold tracking-tight">{activeProject.name}</h1>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    <Badge tone="blue">{activeProject.status}</Badge>
-                    <Badge>{activeProject.location || "Location not set"}</Badge>
-                    <Badge>{activeProject.startDate} → {activeProject.targetFinish}</Badge>
-                    <Badge tone="amber">5-day workweek</Badge>
-                  </div>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2 lg:w-[520px]">
-                  <Field label="Project name">
-                    <Input value={activeProject.name} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, name: e.target.value }))} />
-                  </Field>
-                  <Field label="Location">
-                    <Input value={activeProject.location} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, location: e.target.value }))} />
-                  </Field>
-                </div>
+            <Card title={activeProject.name} subtitle="Superintendent schedule and production intelligence">
+              <div className="grid gap-3 md:grid-cols-2">
+                <Field label="Project name">
+                  <Input
+                    disabled={!canEdit}
+                    value={activeProject.name}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({ ...project, name: event.target.value }))
+                    }
+                  />
+                </Field>
+                <Field label="Location">
+                  <Input
+                    disabled={!canEdit}
+                    value={activeProject.location}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({ ...project, location: event.target.value }))
+                    }
+                  />
+                </Field>
               </div>
-            </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Badge tone="blue">{activeProject.status}</Badge>
+                <Badge>{activeProject.location || "Location not set"}</Badge>
+                <Badge>
+                  {activeProject.startDate} → {activeProject.targetFinish}
+                </Badge>
+                <Badge tone="amber">5-day workweek</Badge>
+              </div>
+            </Card>
 
             <div className="flex flex-wrap gap-2">
               {(["dashboard", "tasks", "entries", "weather", "users", "settings"] as TabKey[]).map((name) => (
-                <button key={name} onClick={() => setTab(name)} className={`rounded-2xl px-4 py-2 text-sm font-medium capitalize ${tab === name ? "bg-slate-900 text-white" : "bg-white text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"}`}>
+                <button
+                  key={name}
+                  onClick={() => setTab(name)}
+                  className={`rounded-2xl px-4 py-2 text-sm font-medium capitalize ${
+                    tab === name
+                      ? "bg-slate-900 text-white"
+                      : "bg-white text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
+                  }`}
+                >
                   {name}
                 </button>
               ))}
             </div>
 
             {tab === "dashboard" ? (
-              <div className="space-y-4">
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-                  <Stat label="Planned Quantity" value={fmt(projectMetrics.plannedQty)} sub="All project tasks" />
-                  <Stat label="Completed Quantity" value={fmt(projectMetrics.completeQty)} sub={`${fmt(projectMetrics.percentComplete, 1)}% complete`} tone="blue" />
-                  <Stat label="Recent Daily Rate" value={fmt(projectMetrics.recentRate, 1)} sub={`Trailing ${activeProject.settings.trailingDays} workdays`} />
-                  <Stat label="Weather-Adjusted Rate" value={fmt(projectMetrics.adjustedRate, 1)} sub="Forecast-adjusted" tone="amber" />
-                  <Stat label="Required Rate" value={fmt(projectMetrics.requiredDailyRate, 1)} sub="Needed to hit target" tone={projectMetrics.adjustedRate >= projectMetrics.requiredDailyRate ? "green" : "red"} />
-                </div>
-
-                <Card title="Progress against schedule" subtitle="Reality vs target finish" icon={BarChart3Icon}>
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="rounded-2xl border border-slate-200 p-4">
-                      <div className="text-sm text-slate-500">Overall completion</div>
-                      <div className="mt-2">
-                        <ProgressBar value={projectMetrics.percentComplete} />
-                      </div>
-                      <div className="mt-2 text-sm text-slate-600">{fmt(projectMetrics.completeQty)} of {fmt(projectMetrics.plannedQty)} complete</div>
-                    </div>
-                    <div className="rounded-2xl border border-slate-200 p-4">
-                      <div className="text-sm text-slate-500">Projected finish</div>
-                      <div className="mt-2 text-2xl font-semibold">{projectMetrics.projectedFinish || "Waiting on data"}</div>
-                      <div className="mt-2 text-sm text-slate-600">Target finish: {activeProject.targetFinish}</div>
-                    </div>
-                  </div>
-                  <div className={`mt-4 rounded-2xl border p-4 ${projectMetrics.finishSlipDays > 0 ? "border-red-200 bg-red-50" : "border-emerald-200 bg-emerald-50"}`}>
-                    <div className="flex items-start gap-3">
-                      {projectMetrics.finishSlipDays > 0 ? <AlertTriangleIcon className="mt-0.5 h-5 w-5 text-red-600" /> : <CheckCircle2Icon className="mt-0.5 h-5 w-5 text-emerald-600" />}
-                      <div>
-                        <div className="font-semibold text-slate-900">{projectMetrics.finishSlipDays > 0 ? `Projected slip: ${projectMetrics.finishSlipDays} workday(s)` : "Tracking on schedule"}</div>
-                        <p className="mt-1 text-sm text-slate-700">{recommendation}</p>
-                      </div>
-                    </div>
-                  </div>
-                </Card>
-
-                <div className="space-y-4">
-                  {activeProject.tasks.map((task) => (
-                    <TaskTrendChart key={task.id} task={task} chartData={buildTaskChartData(activeProject, task)} metrics={getTaskMetrics(activeProject, task)} />
-                  ))}
-                </div>
-              </div>
+              <DashboardTab activeProject={activeProject} projectMetrics={projectMetrics} recommendation={recommendation} />
             ) : null}
 
             {tab === "tasks" ? (
-              <Card title="Task management" subtitle="Per-project quantity, dates, ownership, and target productivity" icon={ClipboardListIcon} action={<button onClick={addTask} className="rounded-2xl bg-slate-900 px-3 py-2 text-sm font-medium text-white"><PlusIcon className="mr-1 inline h-4 w-4" />Add task</button>}>
-                <div className="space-y-4">
-                  {activeProject.tasks.map((task) => {
-                    const metrics = getTaskMetrics(activeProject, task);
-                    return (
-                      <div key={task.id} className="rounded-3xl border border-slate-200 p-4">
-                        <div className="mb-3 flex items-start justify-between gap-3">
-                          <div>
-                            <div className="text-lg font-semibold">{task.name}</div>
-                            <div className="text-sm text-slate-500">Track quantities, dates, and target productivity</div>
-                          </div>
-                          <button onClick={() => removeTask(task.id)} className="rounded-2xl border border-slate-200 p-2 hover:bg-slate-50">
-                            <Trash2Icon className="h-4 w-4" />
-                          </button>
-                        </div>
-                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                          <Field label="Task name"><Input value={task.name} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, tasks: project.tasks.map((item) => (item.id === task.id ? { ...item, name: e.target.value } : item)) }))} /></Field>
-                          <Field label="Category"><Input value={task.category} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, tasks: project.tasks.map((item) => (item.id === task.id ? { ...item, category: e.target.value } : item)) }))} /></Field>
-                          <Field label="Planned quantity"><Input type="number" value={task.plannedQty} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, tasks: project.tasks.map((item) => (item.id === task.id ? { ...item, plannedQty: safeNonNegativeNumber(e.target.value, 0) } : item)) }))} /></Field>
-                          <Field label="Baseline complete"><Input type="number" value={task.completeQty} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, tasks: project.tasks.map((item) => (item.id === task.id ? { ...item, completeQty: safeNonNegativeNumber(e.target.value, 0) } : item)) }))} /></Field>
-                          <Field label="Unit"><Input value={task.unit} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, tasks: project.tasks.map((item) => (item.id === task.id ? { ...item, unit: e.target.value } : item)) }))} /></Field>
-                          <Field label="Start date"><Input type="date" value={task.startDate} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, tasks: project.tasks.map((item) => (item.id === task.id ? { ...item, startDate: e.target.value } : item)) }))} /></Field>
-                          <Field label="Target finish"><Input type="date" value={task.targetFinish} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, tasks: project.tasks.map((item) => (item.id === task.id ? { ...item, targetFinish: e.target.value } : item)) }))} /></Field>
-                          <Field label="Target productivity / person / day"><Input type="number" step="0.1" value={task.targetProductivityPerPerson} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, tasks: project.tasks.map((item) => (item.id === task.id ? { ...item, targetProductivityPerPerson: Math.max(0.01, safeNonNegativeNumber(e.target.value, 0.01)) } : item)) }))} /></Field>
-                        </div>
-                        <div className="mt-3"><Field label="Notes"><TextArea value={task.notes} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, tasks: project.tasks.map((item) => (item.id === task.id ? { ...item, notes: e.target.value } : item)) }))} /></Field></div>
-                        <div className="mt-4 grid gap-3 md:grid-cols-4">
-                          <Stat label="Complete" value={`${fmt(metrics.completeQty)} ${task.unit}`} />
-                          <Stat label="Remaining" value={`${fmt(metrics.remainingQty)} ${task.unit}`} />
-                          <Stat label="People needed/day" value={fmt(metrics.requiredHeadcount, 1)} sub={metrics.usingReality ? "based on recent reality" : "based on target productivity"} tone="blue" />
-                          <Stat label="Projected finish" value={metrics.projectedFinish || "—"} sub={metrics.slipDays > 0 ? `${metrics.slipDays} workdays late` : "On track"} tone={metrics.slipDays > 0 ? "red" : "green"} />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </Card>
+              <TasksTab
+                activeProject={activeProject}
+                canEdit={canEdit}
+                isAdmin={isAdmin}
+                addTask={addTask}
+                removeTask={removeTask}
+                updateProject={updateProject}
+              />
             ) : null}
 
             {tab === "entries" ? (
-              <Card title="Daily production entries" subtitle="Enter daily production and headcount, then apply it to task progress" icon={CalendarDaysIcon} action={<button onClick={addDailyEntry} className="rounded-2xl bg-slate-900 px-3 py-2 text-sm font-medium text-white"><PlusIcon className="mr-1 inline h-4 w-4" />Add entry</button>}>
-                <div className="space-y-4">
-                  {[...activeProject.dailyEntries].sort((a, b) => a.date.localeCompare(b.date)).reverse().map((entry) => (
-                    <div key={entry.id} className="grid gap-3 rounded-3xl border border-slate-200 p-4 lg:grid-cols-[1fr,1fr,1fr,1fr,1.2fr,auto,auto] lg:items-end">
-                      <Field label="Date"><Input type="date" value={entry.date} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, dailyEntries: project.dailyEntries.map((item) => (item.id === entry.id ? { ...item, date: e.target.value } : item)) }))} /></Field>
-                      <Field label="Task"><Select value={entry.taskId || "all"} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, dailyEntries: project.dailyEntries.map((item) => (item.id === entry.id ? { ...item, taskId: e.target.value === "all" ? null : e.target.value, applied: false } : item)) }))}><option value="all">Project-level only</option>{activeProject.tasks.map((task) => <option key={task.id} value={task.id}>{task.name}</option>)}</Select></Field>
-                      <Field label="Quantity"><Input type="number" value={entry.qty} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, dailyEntries: project.dailyEntries.map((item) => (item.id === entry.id ? { ...item, qty: safeNonNegativeNumber(e.target.value, 0) } : item)) }))} /></Field>
-                      <Field label="Headcount"><Input type="number" value={entry.headcount} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, dailyEntries: project.dailyEntries.map((item) => (item.id === entry.id ? { ...item, headcount: safeNonNegativeNumber(e.target.value, 0) } : item)) }))} /></Field>
-                      <Field label="Notes"><Input value={entry.note} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, dailyEntries: project.dailyEntries.map((item) => (item.id === entry.id ? { ...item, note: e.target.value } : item)) }))} /></Field>
-                      <button onClick={() => toggleApplyEntry(entry)} disabled={!entry.taskId} className={`rounded-2xl px-3 py-2.5 text-sm font-medium ${!entry.taskId ? "cursor-not-allowed border border-slate-200 text-slate-400" : entry.applied ? "bg-emerald-600 text-white hover:bg-emerald-700" : "border border-slate-300 text-slate-700 hover:bg-slate-50"}`}>
-                        {entry.applied ? "Applied" : "Apply"}
-                      </button>
-                      <button onClick={() => removeDailyEntry(entry.id)} className="rounded-2xl border border-slate-200 px-3 py-2.5 text-sm font-medium hover:bg-slate-50">
-                        Delete
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </Card>
+              <EntriesTab
+                activeProject={activeProject}
+                canEdit={canEdit}
+                addDailyEntry={addDailyEntry}
+                removeDailyEntry={removeDailyEntry}
+                toggleApplyEntry={toggleApplyEntry}
+                updateProject={updateProject}
+              />
             ) : null}
 
             {tab === "weather" ? (
-              <Card title="10-day weather cycle" subtitle="Pulled from project location, with manual override available" icon={CloudRainIcon} action={<button onClick={refreshWeather} disabled={weatherLoading} className={`rounded-2xl px-3 py-2 text-sm font-medium ${weatherLoading ? "border border-slate-200 text-slate-400" : "bg-slate-900 text-white"}`}><RefreshCwIcon className={`mr-1 inline h-4 w-4 ${weatherLoading ? "animate-spin" : ""}`} />Refresh</button>}>
-                {weatherError ? <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{weatherError}</div> : null}
-                <div className="grid gap-3 lg:grid-cols-2">
-                  {activeProject.weather.map((day) => (
-                    <WeatherCard key={day.id} day={day} projectId={activeProject.id} updateProject={updateProject} />
-                  ))}
-                </div>
-              </Card>
+              <WeatherTab
+                activeProject={activeProject}
+                canEdit={canEdit}
+                weatherLoading={weatherLoading}
+                weatherError={weatherError}
+                refreshWeather={refreshWeather}
+                updateProject={updateProject}
+              />
             ) : null}
 
             {tab === "users" ? (
-              <Card title="Users and roles" subtitle="Assign who can own tasks or update the tracker" icon={UsersIcon} action={<button onClick={addUser} className="rounded-2xl bg-slate-900 px-3 py-2 text-sm font-medium text-white"><PlusIcon className="mr-1 inline h-4 w-4" />Add user</button>}>
-                <div className="grid gap-3 md:grid-cols-2">
-                  {data.users.map((user) => (
-                    <div key={user.id} className="rounded-3xl border border-slate-200 p-4">
-                      <div className="mb-3 flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-lg font-semibold">{user.name}</div>
-                          <div className="text-sm text-slate-500">{user.role}</div>
-                        </div>
-                        <button onClick={() => removeUser(user.id)} className="rounded-2xl border border-slate-200 p-2 hover:bg-slate-50">
-                          <Trash2Icon className="h-4 w-4" />
-                        </button>
-                      </div>
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <Field label="Name"><Input value={user.name} onChange={(e) => setData((prev) => ({ ...prev, users: prev.users.map((item) => (item.id === user.id ? { ...item, name: e.target.value } : item)) }))} /></Field>
-                        <Field label="Role"><Select value={user.role} onChange={(e) => setData((prev) => ({ ...prev, users: prev.users.map((item) => (item.id === user.id ? { ...item, role: e.target.value as UserRole } : item)) }))}><option value="Admin">Admin</option><option value="Editor">Editor</option><option value="Viewer">Viewer</option></Select></Field>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </Card>
+              <UsersTab
+                users={data.users}
+                isAdmin={isAdmin}
+                hasConfiguredEmails={hasConfiguredEmails}
+                usesSupabase={Boolean(supabaseRef.current)}
+                addUser={addUser}
+                removeUser={removeUser}
+                setData={setData}
+              />
             ) : null}
 
             {tab === "settings" ? (
-              <Card title="Program settings" subtitle="Tune forecasting and persistence behavior" icon={Edit3Icon}>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Project start date"><Input type="date" value={activeProject.startDate} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, startDate: e.target.value }))} /></Field>
-                  <Field label="Target finish"><Input type="date" value={activeProject.targetFinish} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, targetFinish: e.target.value }))} /></Field>
-                  <Field label="Project status"><Select value={activeProject.status} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, status: e.target.value }))}><option value="Active">Active</option><option value="Delayed">Delayed</option><option value="Complete">Complete</option></Select></Field>
-                  <Field label="Trailing workdays used for recent reality"><Input type="number" min="1" value={activeProject.settings.trailingDays} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, settings: { ...project.settings, trailingDays: safePositiveInteger(e.target.value, 5) } }))} /></Field>
-                </div>
-                <label className="mt-4 flex items-center justify-between rounded-2xl border border-slate-200 p-3">
-                  <div>
-                    <div className="font-medium">Use weather in projection</div>
-                    <div className="text-sm text-slate-500">Apply the 10-day forecast to forward-looking production and finish dates.</div>
-                  </div>
-                  <input type="checkbox" checked={activeProject.settings.useWeatherInProjection} onChange={(e) => updateProject(activeProject.id, (project) => ({ ...project, settings: { ...project.settings, useWeatherInProjection: e.target.checked } }))} />
-                </label>
-              </Card>
+              <SettingsTab activeProject={activeProject} canEdit={canEdit} updateProject={updateProject} />
             ) : null}
           </main>
         </div>
       </div>
     </div>
+  );
+}
+
+function DashboardTab({
+  activeProject,
+  projectMetrics,
+  recommendation,
+}: {
+  activeProject: Project;
+  projectMetrics: ReturnType<typeof getProjectMetrics>;
+  recommendation: string;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <Stat label="Planned Quantity" value={fmt(projectMetrics.plannedQty)} />
+        <Stat
+          label="Completed Quantity"
+          value={fmt(projectMetrics.completeQty)}
+          sub={`${fmt(projectMetrics.percentComplete, 1)}% complete`}
+          tone="blue"
+        />
+        <Stat
+          label="Recent Daily Rate"
+          value={fmt(projectMetrics.recentRate, 1)}
+          sub={`Trailing ${activeProject.settings.trailingDays} workdays`}
+        />
+        <Stat label="Weather-Adjusted Rate" value={fmt(projectMetrics.adjustedRate, 1)} sub="Forecast" tone="amber" />
+        <Stat
+          label="Required Rate"
+          value={fmt(projectMetrics.requiredDailyRate, 1)}
+          sub="Needed to hit target"
+          tone={projectMetrics.adjustedRate >= projectMetrics.requiredDailyRate ? "green" : "red"}
+        />
+      </div>
+
+      <Card title="Progress against schedule" subtitle="Reality vs target finish">
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="rounded-2xl border border-slate-200 p-4">
+            <div className="text-sm text-slate-500">Overall completion</div>
+            <div className="mt-2">
+              <ProgressBar value={projectMetrics.percentComplete} />
+            </div>
+            <div className="mt-2 text-sm text-slate-600">
+              {fmt(projectMetrics.completeQty)} of {fmt(projectMetrics.plannedQty)} complete
+            </div>
+          </div>
+          <div className="rounded-2xl border border-slate-200 p-4">
+            <div className="text-sm text-slate-500">Projected finish</div>
+            <div className="mt-2 text-2xl font-semibold">{projectMetrics.projectedFinish || "Waiting on data"}</div>
+            <div className="mt-2 text-sm text-slate-600">Target finish: {activeProject.targetFinish}</div>
+          </div>
+        </div>
+        <div
+          className={`mt-4 rounded-2xl border p-4 ${
+            projectMetrics.finishSlipDays > 0 ? "border-red-200 bg-red-50" : "border-emerald-200 bg-emerald-50"
+          }`}
+        >
+          <div className="font-semibold text-slate-900">
+            {projectMetrics.finishSlipDays > 0
+              ? `Projected slip: ${projectMetrics.finishSlipDays} workday(s)`
+              : "Tracking on schedule"}
+          </div>
+          <p className="mt-1 text-sm text-slate-700">{recommendation}</p>
+        </div>
+      </Card>
+
+      {activeProject.tasks.map((task) => {
+        const metrics = getTaskMetrics(activeProject, task);
+        const chartData = buildTaskChartData(activeProject, task);
+        return (
+          <Card key={task.id} title={task.name} subtitle={`Task chart • ${task.category} • ${task.unit}`}>
+            <div className="mb-4 grid gap-3 md:grid-cols-5">
+              <Stat label="Complete" value={fmt(metrics.completeQty)} sub={task.unit} />
+              <Stat label="Remaining" value={fmt(metrics.remainingQty)} sub={task.unit} />
+              <Stat label="Required/day" value={fmt(metrics.requiredDailyRate, 1)} sub={task.unit} tone="amber" />
+              <Stat
+                label="People needed/day"
+                value={fmt(metrics.requiredHeadcount, 1)}
+                sub={metrics.usingReality ? "actual productivity" : "target productivity"}
+                tone="blue"
+              />
+              <Stat
+                label="Projected finish"
+                value={metrics.projectedFinish || "—"}
+                sub={`Target ${task.targetFinish}`}
+                tone={metrics.slipDays > 0 ? "red" : "green"}
+              />
+            </div>
+            <div className="h-[320px] w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={chartData} margin={{ top: 10, right: 16, left: 0, bottom: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="label" />
+                  <YAxis yAxisId="qty" />
+                  <YAxis yAxisId="people" orientation="right" />
+                  <Tooltip />
+                  <Legend />
+                  <Bar yAxisId="qty" dataKey="actualQty" name="Actual qty" />
+                  <Bar yAxisId="qty" dataKey="requiredQty" name="Required qty" />
+                  <Line yAxisId="qty" type="monotone" dataKey="trendQty" name="Current pace forecast" dot={false} />
+                  <Line yAxisId="people" type="monotone" dataKey="requiredHeadcount" name="Required people" dot={false} />
+                  <Line yAxisId="people" type="monotone" dataKey="actualHeadcount" name="Actual people" dot={false} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+function TasksTab({
+  activeProject,
+  canEdit,
+  isAdmin,
+  addTask,
+  removeTask,
+  updateProject,
+}: {
+  activeProject: Project;
+  canEdit: boolean;
+  isAdmin: boolean;
+  addTask: () => void;
+  removeTask: (taskId: string) => void;
+  updateProject: (projectId: string, updater: (project: Project) => Project) => void;
+}) {
+  return (
+    <Card
+      title="Task management"
+      subtitle="Per-project quantity, dates, and target productivity"
+      action={<Button disabled={!canEdit} onClick={addTask}>Add task</Button>}
+    >
+      <div className="space-y-4">
+        {activeProject.tasks.map((task) => {
+          const metrics = getTaskMetrics(activeProject, task);
+          return (
+            <div key={task.id} className="rounded-3xl border border-slate-200 p-4">
+              <div className="mb-3 flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-lg font-semibold">{task.name}</div>
+                  <div className="text-sm text-slate-500">Track quantities, dates, and target productivity</div>
+                </div>
+                {isAdmin ? <Button danger onClick={() => removeTask(task.id)}>Delete</Button> : null}
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <Field label="Task name">
+                  <Input
+                    disabled={!canEdit}
+                    value={task.name}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({
+                        ...project,
+                        tasks: project.tasks.map((item) =>
+                          item.id === task.id ? { ...item, name: event.target.value } : item,
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Category">
+                  <Input
+                    disabled={!canEdit}
+                    value={task.category}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({
+                        ...project,
+                        tasks: project.tasks.map((item) =>
+                          item.id === task.id ? { ...item, category: event.target.value } : item,
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Planned quantity">
+                  <Input
+                    disabled={!canEdit}
+                    type="number"
+                    value={task.plannedQty}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({
+                        ...project,
+                        tasks: project.tasks.map((item) =>
+                          item.id === task.id
+                            ? { ...item, plannedQty: safeNonNegativeNumber(event.target.value, 0) }
+                            : item,
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Baseline complete">
+                  <Input
+                    disabled={!canEdit}
+                    type="number"
+                    value={task.baselineCompleteQty}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({
+                        ...project,
+                        tasks: project.tasks.map((item) =>
+                          item.id === task.id
+                            ? { ...item, baselineCompleteQty: safeNonNegativeNumber(event.target.value, 0) }
+                            : item,
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Unit">
+                  <Input
+                    disabled={!canEdit}
+                    value={task.unit}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({
+                        ...project,
+                        tasks: project.tasks.map((item) =>
+                          item.id === task.id ? { ...item, unit: event.target.value } : item,
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Start date">
+                  <Input
+                    disabled={!canEdit}
+                    type="date"
+                    value={task.startDate}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({
+                        ...project,
+                        tasks: project.tasks.map((item) =>
+                          item.id === task.id ? { ...item, startDate: event.target.value } : item,
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Target finish">
+                  <Input
+                    disabled={!canEdit}
+                    type="date"
+                    value={task.targetFinish}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({
+                        ...project,
+                        tasks: project.tasks.map((item) =>
+                          item.id === task.id ? { ...item, targetFinish: event.target.value } : item,
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Target productivity / person / day">
+                  <Input
+                    disabled={!canEdit}
+                    type="number"
+                    step="0.1"
+                    value={task.targetProductivityPerPerson}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({
+                        ...project,
+                        tasks: project.tasks.map((item) =>
+                          item.id === task.id
+                            ? {
+                                ...item,
+                                targetProductivityPerPerson: Math.max(
+                                  0.01,
+                                  safeNonNegativeNumber(event.target.value, 0.01),
+                                ),
+                              }
+                            : item,
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+              </div>
+
+              <div className="mt-3">
+                <Field label="Notes">
+                  <TextArea
+                    disabled={!canEdit}
+                    value={task.notes}
+                    onChange={(event) =>
+                      updateProject(activeProject.id, (project) => ({
+                        ...project,
+                        tasks: project.tasks.map((item) =>
+                          item.id === task.id ? { ...item, notes: event.target.value } : item,
+                        ),
+                      }))
+                    }
+                  />
+                </Field>
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-4">
+                <Stat label="Complete" value={`${fmt(metrics.completeQty)} ${task.unit}`} />
+                <Stat label="Remaining" value={`${fmt(metrics.remainingQty)} ${task.unit}`} />
+                <Stat
+                  label="People needed/day"
+                  value={fmt(metrics.requiredHeadcount, 1)}
+                  sub={metrics.usingReality ? "based on recent reality" : "based on target productivity"}
+                  tone="blue"
+                />
+                <Stat
+                  label="Projected finish"
+                  value={metrics.projectedFinish || "—"}
+                  sub={metrics.slipDays > 0 ? `${metrics.slipDays} workdays late` : "On track"}
+                  tone={metrics.slipDays > 0 ? "red" : "green"}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function EntriesTab({
+  activeProject,
+  canEdit,
+  addDailyEntry,
+  removeDailyEntry,
+  toggleApplyEntry,
+  updateProject,
+}: {
+  activeProject: Project;
+  canEdit: boolean;
+  addDailyEntry: () => void;
+  removeDailyEntry: (entryId: string) => void;
+  toggleApplyEntry: (entry: DailyEntry) => void;
+  updateProject: (projectId: string, updater: (project: Project) => Project) => void;
+}) {
+  return (
+    <Card
+      title="Daily production entries"
+      subtitle="Unapplied entries do not affect task progress or projections."
+      action={<Button disabled={!canEdit} onClick={addDailyEntry}>Add entry</Button>}
+    >
+      <div className="space-y-4">
+        {[...activeProject.dailyEntries]
+          .sort((a, b) => b.date.localeCompare(a.date))
+          .map((entry) => (
+            <div
+              key={entry.id}
+              className="grid gap-3 rounded-3xl border border-slate-200 p-4 lg:grid-cols-[1fr,1fr,1fr,1fr,1.2fr,auto,auto]"
+            >
+              <Field label="Date">
+                <Input
+                  disabled={!canEdit}
+                  type="date"
+                  value={entry.date}
+                  onChange={(event) =>
+                    updateProject(activeProject.id, (project) => ({
+                      ...project,
+                      dailyEntries: project.dailyEntries.map((item) =>
+                        item.id === entry.id ? { ...item, date: event.target.value } : item,
+                      ),
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="Task">
+                <Select
+                  disabled={!canEdit}
+                  value={entry.taskId || "all"}
+                  onChange={(event) =>
+                    updateProject(activeProject.id, (project) => ({
+                      ...project,
+                      dailyEntries: project.dailyEntries.map((item) =>
+                        item.id === entry.id
+                          ? {
+                              ...item,
+                              taskId: event.target.value === "all" ? null : event.target.value,
+                              applied: false,
+                            }
+                          : item,
+                      ),
+                    }))
+                  }
+                >
+                  <option value="all">Project-level only</option>
+                  {activeProject.tasks.map((task) => (
+                    <option key={task.id} value={task.id}>
+                      {task.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Quantity">
+                <Input
+                  disabled={!canEdit}
+                  type="number"
+                  value={entry.qty}
+                  onChange={(event) =>
+                    updateProject(activeProject.id, (project) => ({
+                      ...project,
+                      dailyEntries: project.dailyEntries.map((item) =>
+                        item.id === entry.id ? { ...item, qty: safeNonNegativeNumber(event.target.value, 0) } : item,
+                      ),
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="Headcount">
+                <Input
+                  disabled={!canEdit}
+                  type="number"
+                  value={entry.headcount}
+                  onChange={(event) =>
+                    updateProject(activeProject.id, (project) => ({
+                      ...project,
+                      dailyEntries: project.dailyEntries.map((item) =>
+                        item.id === entry.id
+                          ? { ...item, headcount: safeNonNegativeNumber(event.target.value, 0) }
+                          : item,
+                      ),
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="Notes">
+                <Input
+                  disabled={!canEdit}
+                  value={entry.note}
+                  onChange={(event) =>
+                    updateProject(activeProject.id, (project) => ({
+                      ...project,
+                      dailyEntries: project.dailyEntries.map((item) =>
+                        item.id === entry.id ? { ...item, note: event.target.value } : item,
+                      ),
+                    }))
+                  }
+                />
+              </Field>
+              <div className="flex items-end">
+                <Button disabled={!canEdit} onClick={() => toggleApplyEntry(entry)}>
+                  {entry.applied ? "Applied" : "Apply"}
+                </Button>
+              </div>
+              <div className="flex items-end">
+                <Button secondary disabled={!canEdit} onClick={() => removeDailyEntry(entry.id)}>
+                  Delete
+                </Button>
+              </div>
+            </div>
+          ))}
+      </div>
+    </Card>
+  );
+}
+
+function WeatherTab({
+  activeProject,
+  canEdit,
+  weatherLoading,
+  weatherError,
+  refreshWeather,
+  updateProject,
+}: {
+  activeProject: Project;
+  canEdit: boolean;
+  weatherLoading: boolean;
+  weatherError: string;
+  refreshWeather: () => Promise<void>;
+  updateProject: (projectId: string, updater: (project: Project) => Project) => void;
+}) {
+  return (
+    <Card
+      title="10-day weather cycle"
+      subtitle="Weather affects forward-looking projections."
+      action={
+        <Button disabled={!canEdit || weatherLoading} onClick={() => void refreshWeather()}>
+          {weatherLoading ? "Refreshing..." : "Refresh weather"}
+        </Button>
+      }
+    >
+      {weatherError ? (
+        <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {weatherError}
+        </div>
+      ) : null}
+      <div className="grid gap-3 lg:grid-cols-2">
+        {activeProject.weather.map((day) => (
+          <div key={day.id} className="grid gap-3 rounded-3xl border border-slate-200 p-4 md:grid-cols-3">
+            <Field label="Date">
+              <Input
+                disabled={!canEdit}
+                type="date"
+                value={day.date}
+                onChange={(event) =>
+                  updateProject(activeProject.id, (project) => ({
+                    ...project,
+                    weather: project.weather.map((item) =>
+                      item.id === day.id ? { ...item, date: event.target.value } : item,
+                    ),
+                  }))
+                }
+              />
+            </Field>
+            <Field label="Condition">
+              <Select
+                disabled={!canEdit}
+                value={day.type}
+                onChange={(event) =>
+                  updateProject(activeProject.id, (project) => ({
+                    ...project,
+                    weather: project.weather.map((item) =>
+                      item.id === day.id
+                        ? { ...item, type: event.target.value as WeatherType, source: "manual" }
+                        : item,
+                    ),
+                  }))
+                }
+              >
+                {WEATHER_TYPES.map((type) => (
+                  <option key={type.value} value={type.value}>
+                    {type.label} ({type.factor}x)
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Note">
+              <Input
+                disabled={!canEdit}
+                value={day.note}
+                onChange={(event) =>
+                  updateProject(activeProject.id, (project) => ({
+                    ...project,
+                    weather: project.weather.map((item) =>
+                      item.id === day.id ? { ...item, note: event.target.value } : item,
+                    ),
+                  }))
+                }
+              />
+            </Field>
+            <div className="text-sm text-slate-500 md:col-span-3">
+              Impact factor: <strong>{weatherMeta(day.type).factor}x</strong> •{" "}
+              {day.source === "api" ? "From forecast" : "Manual override"}
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function UsersTab({
+  users,
+  isAdmin,
+  hasConfiguredEmails,
+  usesSupabase,
+  addUser,
+  removeUser,
+  setData,
+}: {
+  users: AppUser[];
+  isAdmin: boolean;
+  hasConfiguredEmails: boolean;
+  usesSupabase: boolean;
+  addUser: () => void;
+  removeUser: (userId: string) => void;
+  setData: React.Dispatch<React.SetStateAction<AppState>>;
+}) {
+  return (
+    <Card
+      title="Users and roles"
+      subtitle="Email must match the Supabase login email."
+      action={<Button disabled={!isAdmin} onClick={addUser}>Add user</Button>}
+    >
+      {!hasConfiguredEmails && usesSupabase ? (
+        <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          No user emails are configured yet. The first signed-in user is treated as Admin until emails are added.
+        </div>
+      ) : null}
+      <div className="grid gap-3 md:grid-cols-2">
+        {users.map((user) => (
+          <div key={user.id} className="rounded-3xl border border-slate-200 p-4">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-lg font-semibold">{user.name}</div>
+                <div className="text-sm text-slate-500">{user.role}</div>
+              </div>
+              {isAdmin ? (
+                <Button secondary onClick={() => removeUser(user.id)}>
+                  Delete
+                </Button>
+              ) : null}
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              <Field label="Name">
+                <Input
+                  disabled={!isAdmin}
+                  value={user.name}
+                  onChange={(event) =>
+                    setData((prev) => ({
+                      ...prev,
+                      users: prev.users.map((item) =>
+                        item.id === user.id ? { ...item, name: event.target.value } : item,
+                      ),
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="Email">
+                <Input
+                  disabled={!isAdmin}
+                  type="email"
+                  value={user.email}
+                  onChange={(event) =>
+                    setData((prev) => ({
+                      ...prev,
+                      users: prev.users.map((item) =>
+                        item.id === user.id ? { ...item, email: event.target.value } : item,
+                      ),
+                    }))
+                  }
+                />
+              </Field>
+              <Field label="Role">
+                <Select
+                  disabled={!isAdmin}
+                  value={user.role}
+                  onChange={(event) =>
+                    setData((prev) => {
+                      const nextRole = event.target.value as UserRole;
+                      const adminCount = prev.users.filter((item) => item.role === "Admin").length;
+                      if (user.role === "Admin" && nextRole !== "Admin" && adminCount <= 1) {
+                        alert("You must keep at least one Admin user.");
+                        return prev;
+                      }
+                      return {
+                        ...prev,
+                        users: prev.users.map((item) =>
+                          item.id === user.id ? { ...item, role: nextRole } : item,
+                        ),
+                      };
+                    })
+                  }
+                >
+                  <option value="Admin">Admin</option>
+                  <option value="Editor">Editor</option>
+                  <option value="Viewer">Viewer</option>
+                </Select>
+              </Field>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function SettingsTab({
+  activeProject,
+  canEdit,
+  updateProject,
+}: {
+  activeProject: Project;
+  canEdit: boolean;
+  updateProject: (projectId: string, updater: (project: Project) => Project) => void;
+}) {
+  return (
+    <Card title="Program settings" subtitle="Tune forecasting and persistence behavior">
+      <div className="grid gap-4 md:grid-cols-2">
+        <Field label="Project start date">
+          <Input
+            disabled={!canEdit}
+            type="date"
+            value={activeProject.startDate}
+            onChange={(event) =>
+              updateProject(activeProject.id, (project) => ({ ...project, startDate: event.target.value }))
+            }
+          />
+        </Field>
+        <Field label="Target finish">
+          <Input
+            disabled={!canEdit}
+            type="date"
+            value={activeProject.targetFinish}
+            onChange={(event) =>
+              updateProject(activeProject.id, (project) => ({ ...project, targetFinish: event.target.value }))
+            }
+          />
+        </Field>
+        <Field label="Project status">
+          <Select
+            disabled={!canEdit}
+            value={activeProject.status}
+            onChange={(event) =>
+              updateProject(activeProject.id, (project) => ({ ...project, status: event.target.value }))
+            }
+          >
+            <option value="Active">Active</option>
+            <option value="Delayed">Delayed</option>
+            <option value="Complete">Complete</option>
+          </Select>
+        </Field>
+        <Field label="Trailing workdays used for recent reality">
+          <Input
+            disabled={!canEdit}
+            type="number"
+            min="1"
+            value={activeProject.settings.trailingDays}
+            onChange={(event) =>
+              updateProject(activeProject.id, (project) => ({
+                ...project,
+                settings: {
+                  ...project.settings,
+                  trailingDays: safePositiveInteger(event.target.value, 5),
+                },
+              }))
+            }
+          />
+        </Field>
+      </div>
+      <label className="mt-4 flex items-center justify-between rounded-2xl border border-slate-200 p-3">
+        <div>
+          <div className="font-medium">Use weather in projection</div>
+          <div className="text-sm text-slate-500">
+            Apply the 10-day forecast to forward-looking production and finish dates.
+          </div>
+        </div>
+        <input
+          disabled={!canEdit}
+          type="checkbox"
+          checked={activeProject.settings.useWeatherInProjection}
+          onChange={(event) =>
+            updateProject(activeProject.id, (project) => ({
+              ...project,
+              settings: { ...project.settings, useWeatherInProjection: event.target.checked },
+            }))
+          }
+        />
+      </label>
+    </Card>
   );
 }
 
