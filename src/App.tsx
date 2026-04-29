@@ -372,12 +372,30 @@ function getSupabaseClient(): SupabaseClient | null {
   });
 }
 
+function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), ms);
+
+    Promise.resolve(promise)
+      .then((result) => {
+        window.clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
 async function loadRemoteState(client: SupabaseClient): Promise<AppState | null> {
-  const { data, error } = await client
+  const request = client
     .from("app_state")
     .select("id,payload,updated_at")
     .eq("id", SHARED_STATE_ROW_ID)
     .maybeSingle<SharedStateRow>();
+
+  const { data, error } = await withTimeout(request, 8000, "Supabase load timed out");
+
   if (error) throw error;
   if (!data?.payload) return null;
   return sanitizeState(data.payload);
@@ -926,12 +944,17 @@ function AppShell() {
           });
         }
       })
-      .catch(() => {
-        if (!cancelled) setSyncMessage("Shared database unavailable, using local storage");
-      })
-      .finally(() => {
-        if (!cancelled) setRemoteReady(true);
-      });
+      .catch((error) => {
+  console.error("Supabase connection failed:", error);
+  if (!cancelled) {
+    setSyncMessage(`Shared database unavailable: ${error?.message || "unknown error"}`);
+  }
+})
+.finally(() => {
+  if (!cancelled) {
+    setRemoteReady(true);
+  }
+});
 
     const channel = client
       .channel("shared-app-state")
