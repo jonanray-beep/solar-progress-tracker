@@ -97,17 +97,14 @@ const WEATHER_TYPES: Array<{ value: WeatherType; label: string; factor: number }
   { value: "snow", label: "Snow/Ice", factor: 0.15 },
 ];
 
-function readEnvValue(key: string): string | undefined {
-  try {
-    const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
-    return meta.env?.[key];
-  } catch {
-    return undefined;
-  }
-}
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-const SUPABASE_URL = readEnvValue("VITE_SUPABASE_URL");
-const SUPABASE_ANON_KEY = readEnvValue("VITE_SUPABASE_ANON_KEY");
+console.log("SUPABASE ENV CHECK", {
+  hasUrl: Boolean(SUPABASE_URL),
+  hasKey: Boolean(SUPABASE_ANON_KEY),
+  url: SUPABASE_URL,
+});
 
 function uid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -608,9 +605,9 @@ async function fetchWeatherForLocation(location: string): Promise<WeatherDay[]> 
 }
 
 function runSelfTests() {
-  if (readEnvValue("THIS_ENV_KEY_SHOULD_NOT_EXIST") !== undefined) {
-    throw new Error("Self-test failed: env fallback");
-  }
+if (readEnvValue("THIS_ENV_KEY_SHOULD_NOT_EXIST") !== undefined) {
+  throw new Error("Self-test failed: env fallback");
+}
   if (workdaysBetween("2026-04-20", "2026-04-24") !== 5) {
     throw new Error("Self-test failed: workdaysBetween");
   }
@@ -2155,3 +2152,7 @@ function SettingsTab({
 export default function SolarProgressTrackerApp() {
   return <AppShell />;
 }
+function readEnvValue(arg0: string) {
+  throw new Error("Function not implemented.");
+}
+
