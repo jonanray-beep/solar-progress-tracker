@@ -12,11 +12,22 @@ import {
   YAxis,
 } from "recharts";
 
-const STORAGE_KEY = "solar-progress-tracker-web-v54";
+const STORAGE_KEY = "solar-progress-tracker-web-v57";
+const AUTH_STORAGE_KEY = "solar-progress-tracker-auth-v4";
 const SHARED_STATE_ROW_ID = "global-shared-state";
+const PRIMARY_ADMIN_EMAIL = "jonan.ray@powerrayllc.com";
 const AUTH_REDIRECT_URL = typeof window !== "undefined" ? window.location.origin : undefined;
-const SUPABASE_URL = typeof import.meta !== "undefined" ? import.meta.env?.VITE_SUPABASE_URL : undefined;
-const SUPABASE_ANON_KEY = typeof import.meta !== "undefined" ? import.meta.env?.VITE_SUPABASE_ANON_KEY : undefined;
+function readViteEnv(key: string): string | undefined {
+  try {
+    const meta = import.meta as ImportMeta & { env?: Record<string, string | undefined> };
+    return meta.env?.[key];
+  } catch {
+    return undefined;
+  }
+}
+
+const SUPABASE_URL = readViteEnv("VITE_SUPABASE_URL");
+const SUPABASE_ANON_KEY = readViteEnv("VITE_SUPABASE_ANON_KEY");
 
 type UserRole = "Admin" | "Editor" | "Viewer";
 type WeatherType = "clear" | "cloudy" | "wind" | "rain" | "storm" | "snow";
@@ -100,10 +111,12 @@ const WEATHER_TYPES: Array<{ value: WeatherType; label: string; factor: number }
 ];
 
 function uid(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
   return Math.random().toString(36).slice(2, 12);
+}
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
 }
 
 function parseDate(dateStr: string): Date {
@@ -210,10 +223,7 @@ function buildDefaultWeather(): WeatherDay[] {
 
 function buildDefaultState(): AppState {
   return {
-    users: [
-      { id: uid(), name: "Superintendent", email: "", role: "Admin" },
-      { id: uid(), name: "Project Engineer", email: "", role: "Editor" },
-    ],
+    users: [{ id: "jonan-admin", name: "Jonan Ray", email: PRIMARY_ADMIN_EMAIL, role: "Admin" }],
     projects: [
       {
         id: uid(),
@@ -258,67 +268,104 @@ function buildDefaultState(): AppState {
   };
 }
 
+function normalizeRole(role: unknown): UserRole {
+  return role === "Admin" || role === "Editor" || role === "Viewer" ? role : "Viewer";
+}
+
+function normalizeUsers(users: AppUser[]): AppUser[] {
+  const byKey = new Map<string, AppUser>();
+  users.forEach((user) => {
+    const email = normalizeEmail(user.email);
+    const key = email || user.id || uid();
+    const normalizedUser: AppUser = {
+      id: user.id || uid(),
+      name: user.name || "User",
+      email,
+      role: normalizeRole(user.role),
+    };
+    const existing = byKey.get(key);
+    if (!existing || (existing.role !== "Admin" && normalizedUser.role === "Admin")) byKey.set(key, normalizedUser);
+  });
+  byKey.set(PRIMARY_ADMIN_EMAIL, {
+    id: byKey.get(PRIMARY_ADMIN_EMAIL)?.id || "jonan-admin",
+    name: byKey.get(PRIMARY_ADMIN_EMAIL)?.name || "Jonan Ray",
+    email: PRIMARY_ADMIN_EMAIL,
+    role: "Admin",
+  });
+  return Array.from(byKey.values()).sort((a, b) => {
+    if (a.email === PRIMARY_ADMIN_EMAIL) return -1;
+    if (b.email === PRIMARY_ADMIN_EMAIL) return 1;
+    return (a.email || a.name).localeCompare(b.email || b.name);
+  });
+}
+
+function sanitizeProject(project: any): Project {
+  return {
+    id: typeof project?.id === "string" ? project.id : uid(),
+    name: typeof project?.name === "string" ? project.name : "Untitled Project",
+    location: typeof project?.location === "string" ? project.location : "",
+    status: typeof project?.status === "string" ? project.status : "Active",
+    startDate: typeof project?.startDate === "string" ? project.startDate : todayISO(),
+    targetFinish: typeof project?.targetFinish === "string" ? project.targetFinish : addWorkdays(todayISO(), 20),
+    weather:
+      Array.isArray(project?.weather) && project.weather.length > 0
+        ? project.weather.map((day: any, index: number) => ({
+            id: typeof day?.id === "string" ? day.id : uid(),
+            date: typeof day?.date === "string" ? day.date : getNextWorkdays(todayISO(), 10)[index] || todayISO(),
+            type: weatherMeta(day?.type).value,
+            note: typeof day?.note === "string" ? day.note : "",
+            source: day?.source === "api" ? "api" : "manual",
+          }))
+        : buildDefaultWeather(),
+    tasks: Array.isArray(project?.tasks)
+      ? project.tasks.map((task: any) => ({
+          id: typeof task?.id === "string" ? task.id : uid(),
+          name: typeof task?.name === "string" ? task.name : "Task",
+          category: typeof task?.category === "string" ? task.category : "General",
+          startDate: typeof task?.startDate === "string" ? task.startDate : todayISO(),
+          targetFinish: typeof task?.targetFinish === "string" ? task.targetFinish : addWorkdays(todayISO(), 10),
+          plannedQty: safeNonNegativeNumber(task?.plannedQty, 0),
+          baselineCompleteQty: safeNonNegativeNumber(task?.baselineCompleteQty ?? task?.completeQty, 0),
+          unit: typeof task?.unit === "string" ? task.unit : "units",
+          active: task?.active !== false,
+          notes: typeof task?.notes === "string" ? task.notes : "",
+          targetProductivityPerPerson: Math.max(0.01, safeNonNegativeNumber(task?.targetProductivityPerPerson, 1)),
+        }))
+      : [],
+    dailyEntries: Array.isArray(project?.dailyEntries)
+      ? project.dailyEntries.map((entry: any) => ({
+          id: typeof entry?.id === "string" ? entry.id : uid(),
+          date: typeof entry?.date === "string" ? entry.date : todayISO(),
+          taskId: typeof entry?.taskId === "string" ? entry.taskId : null,
+          qty: safeNonNegativeNumber(entry?.qty, 0),
+          headcount: safeNonNegativeNumber(entry?.headcount, 0),
+          note: typeof entry?.note === "string" ? entry.note : "",
+          applied: Boolean(entry?.applied),
+        }))
+      : [],
+    settings: {
+      useWeatherInProjection: project?.settings?.useWeatherInProjection !== false,
+      trailingDays: safePositiveInteger(project?.settings?.trailingDays, 5),
+    },
+  };
+}
+
 function sanitizeState(state: unknown): AppState {
   const fallback = buildDefaultState();
   if (!state || typeof state !== "object") return fallback;
   const raw = state as Partial<AppState>;
-  if (!Array.isArray(raw.users) || !Array.isArray(raw.projects)) return fallback;
-  return {
-    users: raw.users.map((user: any) => ({
-      id: typeof user?.id === "string" ? user.id : uid(),
-      name: typeof user?.name === "string" ? user.name : "User",
-      email: typeof user?.email === "string" ? user.email : "",
-      role: user?.role === "Admin" || user?.role === "Editor" || user?.role === "Viewer" ? user.role : "Editor",
-    })),
-    projects: raw.projects.map((project: any) => ({
-      id: typeof project?.id === "string" ? project.id : uid(),
-      name: typeof project?.name === "string" ? project.name : "Untitled Project",
-      location: typeof project?.location === "string" ? project.location : "",
-      status: typeof project?.status === "string" ? project.status : "Active",
-      startDate: typeof project?.startDate === "string" ? project.startDate : todayISO(),
-      targetFinish: typeof project?.targetFinish === "string" ? project.targetFinish : addWorkdays(todayISO(), 20),
-      weather:
-        Array.isArray(project?.weather) && project.weather.length > 0
-          ? project.weather.map((day: any, index: number) => ({
-              id: typeof day?.id === "string" ? day.id : uid(),
-              date: typeof day?.date === "string" ? day.date : getNextWorkdays(todayISO(), 10)[index] || todayISO(),
-              type: weatherMeta(day?.type).value,
-              note: typeof day?.note === "string" ? day.note : "",
-              source: day?.source === "api" ? "api" : "manual",
-            }))
-          : buildDefaultWeather(),
-      tasks: Array.isArray(project?.tasks)
-        ? project.tasks.map((task: any) => ({
-            id: typeof task?.id === "string" ? task.id : uid(),
-            name: typeof task?.name === "string" ? task.name : "Task",
-            category: typeof task?.category === "string" ? task.category : "General",
-            startDate: typeof task?.startDate === "string" ? task.startDate : todayISO(),
-            targetFinish: typeof task?.targetFinish === "string" ? task.targetFinish : addWorkdays(todayISO(), 10),
-            plannedQty: safeNonNegativeNumber(task?.plannedQty, 0),
-            baselineCompleteQty: safeNonNegativeNumber(task?.baselineCompleteQty ?? task?.completeQty, 0),
-            unit: typeof task?.unit === "string" ? task.unit : "units",
-            active: task?.active !== false,
-            notes: typeof task?.notes === "string" ? task.notes : "",
-            targetProductivityPerPerson: Math.max(0.01, safeNonNegativeNumber(task?.targetProductivityPerPerson, 1)),
-          }))
-        : [],
-      dailyEntries: Array.isArray(project?.dailyEntries)
-        ? project.dailyEntries.map((entry: any) => ({
-            id: typeof entry?.id === "string" ? entry.id : uid(),
-            date: typeof entry?.date === "string" ? entry.date : todayISO(),
-            taskId: typeof entry?.taskId === "string" ? entry.taskId : null,
-            qty: safeNonNegativeNumber(entry?.qty, 0),
-            headcount: safeNonNegativeNumber(entry?.headcount, 0),
-            note: typeof entry?.note === "string" ? entry.note : "",
-            applied: Boolean(entry?.applied),
-          }))
-        : [],
-      settings: {
-        useWeatherInProjection: project?.settings?.useWeatherInProjection !== false,
-        trailingDays: safePositiveInteger(project?.settings?.trailingDays, 5),
-      },
-    })),
-  };
+  const users = normalizeUsers(
+    Array.isArray(raw.users)
+      ? raw.users.map((user: any) => ({
+          id: typeof user?.id === "string" ? user.id : uid(),
+          name: typeof user?.name === "string" ? user.name : "User",
+          email: typeof user?.email === "string" ? user.email : "",
+          role: normalizeRole(user?.role),
+        }))
+      : fallback.users,
+  );
+  const projects = Array.isArray(raw.projects) ? raw.projects.map(sanitizeProject) : fallback.projects;
+  return { users, projects: projects.length ? projects : fallback.projects };
 }
 
 function loadLocalState(): AppState {
@@ -334,9 +381,7 @@ function loadLocalState(): AppState {
 
 function saveLocalState(state: AppState) {
   try {
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    }
+    if (typeof localStorage !== "undefined") localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizeState(state)));
   } catch {}
 }
 
@@ -348,22 +393,30 @@ function getSupabaseClient(): SupabaseClient | null {
       autoRefreshToken: true,
       detectSessionInUrl: true,
       flowType: "pkce",
+      storageKey: AUTH_STORAGE_KEY,
     },
-    global: {
-      headers: { "x-application-name": "solar-progress-tracker" },
-    },
+    global: { headers: { "x-application-name": "solar-progress-tracker" } },
   });
 }
 
 function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): Promise<T> {
   return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error(message)), ms);
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(message));
+    }, ms);
     Promise.resolve(promise)
       .then((result) => {
+        if (settled) return;
+        settled = true;
         window.clearTimeout(timer);
         resolve(result);
       })
       .catch((error) => {
+        if (settled) return;
+        settled = true;
         window.clearTimeout(timer);
         reject(error);
       });
@@ -371,29 +424,22 @@ function withTimeout<T>(promise: PromiseLike<T>, ms: number, message: string): P
 }
 
 async function loadRemoteState(client: SupabaseClient): Promise<AppState | null> {
-  const request = client
-    .from("app_state")
-    .select("id,payload,updated_at")
-    .eq("id", SHARED_STATE_ROW_ID)
-    .maybeSingle<SharedStateRow>();
-  const { data, error } = await withTimeout(request, 8000, "Supabase load timed out");
+  const request = client.from("app_state").select("id,payload,updated_at").eq("id", SHARED_STATE_ROW_ID).maybeSingle<SharedStateRow>();
+  const { data, error } = await withTimeout(request, 10000, "Supabase load timed out");
   if (error) throw error;
   if (!data?.payload) return null;
   return sanitizeState(data.payload);
 }
 
 async function saveRemoteState(client: SupabaseClient, state: AppState): Promise<void> {
-  const request = client.from("app_state").upsert({ id: SHARED_STATE_ROW_ID, payload: sanitizeState(state) });
-  const { error } = await withTimeout(request, 8000, "Supabase save timed out");
+  const payload = sanitizeState(state);
+  const request = client.from("app_state").upsert({ id: SHARED_STATE_ROW_ID, payload });
+  const { error } = await withTimeout(request, 10000, "Supabase save timed out");
   if (error) throw error;
 }
 
 function getTaskAppliedQty(project: Project, taskId: string): number {
-  return sum(
-    project.dailyEntries
-      .filter((entry) => entry.applied && entry.taskId === taskId)
-      .map((entry) => safeNonNegativeNumber(entry.qty, 0)),
-  );
+  return sum(project.dailyEntries.filter((entry) => entry.applied && entry.taskId === taskId).map((entry) => safeNonNegativeNumber(entry.qty, 0)));
 }
 
 function getTaskCompleteQty(project: Project, task: Task): number {
@@ -436,13 +482,7 @@ function getWeatherFactorByDate(project: Project, date: string): number {
   return match ? weatherMeta(match.type).factor : 1;
 }
 
-function forecastFinishDate(args: {
-  startDate: string;
-  targetFinish: string;
-  remainingQty: number;
-  dailyRate: number;
-  project: Project;
-}) {
+function forecastFinishDate(args: { startDate: string; targetFinish: string; remainingQty: number; dailyRate: number; project: Project }) {
   const { startDate, targetFinish, remainingQty, dailyRate, project } = args;
   if (remainingQty <= 0) return { projectedFinish: startDate, adjustedAverageRate: dailyRate, slipDays: 0 };
   if (dailyRate <= 0) return { projectedFinish: null as string | null, adjustedAverageRate: 0, slipDays: 0 };
@@ -470,13 +510,7 @@ function getProjectMetrics(project: Project) {
   const completeQty = sum(project.tasks.map((task) => getTaskCompleteQty(project, task)));
   const remainingQty = Math.max(0, plannedQty - completeQty);
   const recentRate = getRecentRate(getProjectTrailingEntries(project));
-  const forecast = forecastFinishDate({
-    startDate: todayISO(),
-    targetFinish: project.targetFinish,
-    remainingQty,
-    dailyRate: recentRate,
-    project,
-  });
+  const forecast = forecastFinishDate({ startDate: todayISO(), targetFinish: project.targetFinish, remainingQty, dailyRate: recentRate, project });
   const workdaysRemaining = workdaysBetween(todayISO(), project.targetFinish);
   const requiredDailyRate = workdaysRemaining > 0 ? remainingQty / workdaysRemaining : remainingQty;
   const percentComplete = plannedQty > 0 ? (completeQty / plannedQty) * 100 : 0;
@@ -505,13 +539,7 @@ function getTaskMetrics(project: Project, task: Task) {
   const workdaysRemaining = workdaysBetween(todayISO(), task.targetFinish);
   const requiredDailyRate = workdaysRemaining > 0 ? remainingQty / workdaysRemaining : remainingQty;
   const requiredHeadcount = productivityPerPerson > 0 ? requiredDailyRate / productivityPerPerson : 0;
-  const forecast = forecastFinishDate({
-    startDate: todayISO(),
-    targetFinish: task.targetFinish,
-    remainingQty,
-    dailyRate: recentRate,
-    project,
-  });
+  const forecast = forecastFinishDate({ startDate: todayISO(), targetFinish: task.targetFinish, remainingQty, dailyRate: recentRate, project });
   return {
     completeQty,
     remainingQty,
@@ -529,9 +557,7 @@ function getTaskMetrics(project: Project, task: Task) {
 
 function buildTaskChartData(project: Project, task: Task) {
   const taskEntries = getTaskTrailingEntries(project, task.id);
-  const pastDates = getNextWorkdays(addDays(todayISO(), -14), 10)
-    .filter((date) => date <= todayISO())
-    .slice(-5);
+  const pastDates = getNextWorkdays(addDays(todayISO(), -14), 10).filter((date) => date <= todayISO()).slice(-5);
   const futureDates = getNextWorkdays(todayISO(), 15);
   const metrics = getTaskMetrics(project, task);
   let projectedRemaining = metrics.remainingQty;
@@ -570,13 +596,13 @@ function buildTaskChartData(project: Project, task: Task) {
 async function fetchWeatherForLocation(location: string): Promise<WeatherDay[]> {
   if (!location.trim()) return buildDefaultWeather();
   const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1&language=en&format=json`;
-  const geoRes = await withTimeout(fetch(geoUrl), 8000, "Weather lookup timed out");
+  const geoRes = await withTimeout(fetch(geoUrl), 10000, "Weather lookup timed out");
   if (!geoRes.ok) throw new Error("Unable to geocode location.");
   const geoJson = await geoRes.json();
   const result = geoJson?.results?.[0];
   if (!result) throw new Error("Location not found.");
   const forecastUrl = `https://api.open-meteo.com/v1/forecast?latitude=${result.latitude}&longitude=${result.longitude}&daily=weathercode&timezone=auto&forecast_days=16`;
-  const forecastRes = await withTimeout(fetch(forecastUrl), 8000, "Weather forecast timed out");
+  const forecastRes = await withTimeout(fetch(forecastUrl), 10000, "Weather forecast timed out");
   if (!forecastRes.ok) throw new Error("Unable to load weather forecast.");
   const forecastJson = await forecastRes.json();
   const dates: string[] = forecastJson?.daily?.time || [];
@@ -608,10 +634,17 @@ function runSelfTests() {
   if (getTaskCompleteQty(testProject, task) !== task.baselineCompleteQty + 100) throw new Error("Self-test failed: applied entries only");
   if (getTaskTrailingEntries(testProject, task.id).length !== 1) throw new Error("Self-test failed: task trailing entries");
   if (getProjectTrailingEntries(testProject).length !== 2) throw new Error("Self-test failed: project trailing entries");
-  if (sanitizeState({ users: [], projects: [] }).users.length !== 0) throw new Error("Self-test failed: preserve empty arrays");
+  const sanitized = sanitizeState({ users: [], projects: [] });
+  if (sanitized.users.length !== 1 || sanitized.users[0].email !== PRIMARY_ADMIN_EMAIL || sanitized.users[0].role !== "Admin") throw new Error("Self-test failed: admin normalization");
 }
 
-runSelfTests();
+if (readViteEnv("DEV") === "true") {
+  try {
+    runSelfTests();
+  } catch (error) {
+    console.error(error);
+  }
+}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -624,21 +657,13 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
   const { className = "", ...rest } = props;
-  return (
-    <input
-      {...rest}
-      className={`w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 disabled:bg-slate-100 disabled:text-slate-500 ${className}`}
-    />
-  );
+  return <input {...rest} className={`w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 disabled:bg-slate-100 disabled:text-slate-500 ${className}`} />;
 }
 
 function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   const { className = "", children, ...rest } = props;
   return (
-    <select
-      {...rest}
-      className={`w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 disabled:bg-slate-100 disabled:text-slate-500 ${className}`}
-    >
+    <select {...rest} className={`w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 disabled:bg-slate-100 disabled:text-slate-500 ${className}`}>
       {children}
     </select>
   );
@@ -646,39 +671,16 @@ function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
 
 function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
   const { className = "", ...rest } = props;
-  return (
-    <textarea
-      {...rest}
-      className={`min-h-[90px] w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 disabled:bg-slate-100 disabled:text-slate-500 ${className}`}
-    />
-  );
+  return <textarea {...rest} className={`min-h-[90px] w-full rounded-2xl border border-slate-300 px-3 py-2.5 outline-none transition focus:border-slate-500 disabled:bg-slate-100 disabled:text-slate-500 ${className}`} />;
 }
 
-function Button({
-  children,
-  onClick,
-  disabled,
-  danger,
-  secondary,
-  type = "button",
-}: {
-  children: React.ReactNode;
-  onClick?: () => void;
-  disabled?: boolean;
-  danger?: boolean;
-  secondary?: boolean;
-  type?: "button" | "submit";
-}) {
+function Button({ children, onClick, disabled, danger, secondary, type = "button" }: { children: React.ReactNode; onClick?: () => void; disabled?: boolean; danger?: boolean; secondary?: boolean; type?: "button" | "submit" }) {
   const base = "rounded-2xl px-4 py-2 text-sm font-medium transition";
   let style = "bg-slate-900 text-white hover:bg-slate-700";
   if (secondary) style = "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50";
   if (danger) style = "bg-red-600 text-white hover:bg-red-700";
   if (disabled) style = "cursor-not-allowed border border-slate-200 bg-white text-slate-400";
-  return (
-    <button type={type} onClick={onClick} disabled={disabled} className={`${base} ${style}`}>
-      {children}
-    </button>
-  );
+  return <button type={type} onClick={onClick} disabled={disabled} className={`${base} ${style}`}>{children}</button>;
 }
 
 function Card({ title, subtitle, action, children }: { title: string; subtitle?: string; action?: React.ReactNode; children: React.ReactNode }) {
@@ -726,24 +728,10 @@ function Badge({ children, tone = "slate" }: { children: React.ReactNode; tone?:
 
 function ProgressBar({ value }: { value: number }) {
   const width = Math.min(100, Math.max(0, value));
-  return (
-    <div className="h-3 w-full overflow-hidden rounded-full bg-slate-200">
-      <div className="h-full rounded-full bg-slate-900" style={{ width: `${width}%` }} />
-    </div>
-  );
+  return <div className="h-3 w-full overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-slate-900" style={{ width: `${width}%` }} /></div>;
 }
 
-function AuthScreen(props: {
-  loading: boolean;
-  mode: "signin" | "signup";
-  setMode: React.Dispatch<React.SetStateAction<"signin" | "signup">>;
-  email: string;
-  setEmail: React.Dispatch<React.SetStateAction<string>>;
-  password: string;
-  setPassword: React.Dispatch<React.SetStateAction<string>>;
-  onSubmit: () => Promise<void>;
-  message: string;
-}) {
+function AuthScreen(props: { loading: boolean; mode: "signin" | "signup"; setMode: React.Dispatch<React.SetStateAction<"signin" | "signup">>; email: string; setEmail: React.Dispatch<React.SetStateAction<string>>; password: string; setPassword: React.Dispatch<React.SetStateAction<string>>; onSubmit: () => Promise<void>; message: string }) {
   const { loading, mode, setMode, email, setEmail, password, setPassword, onSubmit, message } = props;
   return (
     <div className="min-h-screen bg-slate-100 px-4 py-10 text-slate-900">
@@ -758,15 +746,9 @@ function AuthScreen(props: {
           <Button secondary={mode !== "signup"} onClick={() => setMode("signup")}>Create account</Button>
         </div>
         <div className="space-y-4">
-          <Field label="Email">
-            <Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
-          </Field>
-          <Field label="Password">
-            <Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
-          </Field>
-          <Button disabled={loading || !email || !password} onClick={() => void onSubmit()}>
-            {loading ? "Working..." : mode === "signin" ? "Sign in" : "Create account"}
-          </Button>
+          <Field label="Email"><Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></Field>
+          <Field label="Password"><Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></Field>
+          <Button disabled={loading || !email || !password} onClick={() => void onSubmit()}>{loading ? "Working..." : mode === "signin" ? "Sign in" : "Create account"}</Button>
           {message ? <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">{message}</div> : null}
         </div>
       </div>
@@ -847,10 +829,7 @@ function TasksTab({ activeProject, canEdit, isAdmin, addTask, removeTask, update
           return (
             <div key={task.id} className="rounded-3xl border border-slate-200 p-4">
               <div className="mb-3 flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-lg font-semibold">{task.name}</div>
-                  <div className="text-sm text-slate-500">Track quantities, dates, and target productivity</div>
-                </div>
+                <div><div className="text-lg font-semibold">{task.name}</div><div className="text-sm text-slate-500">Track quantities, dates, and target productivity</div></div>
                 {isAdmin ? <Button danger onClick={() => removeTask(task.id)}>Delete</Button> : null}
               </div>
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -919,15 +898,15 @@ function WeatherTab({ activeProject, canEdit, weatherLoading, weatherError, refr
 function UsersTab({ users, isAdmin, hasConfiguredEmails, usesSupabase, addUser, removeUser, setData }: { users: AppUser[]; isAdmin: boolean; hasConfiguredEmails: boolean; usesSupabase: boolean; addUser: () => void; removeUser: (userId: string) => void; setData: React.Dispatch<React.SetStateAction<AppState>> }) {
   return (
     <Card title="Users and roles" subtitle="Email must match the Supabase login email." action={<Button disabled={!isAdmin} onClick={addUser}>Add user</Button>}>
-      {!hasConfiguredEmails && usesSupabase ? <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">No user emails are configured yet. The first signed-in user is treated as Admin until emails are added.</div> : null}
+      {!hasConfiguredEmails && usesSupabase ? <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">No user emails are configured yet. Only the primary admin can edit until users are added.</div> : null}
       <div className="grid gap-3 md:grid-cols-2">
         {users.map((user) => (
           <div key={user.id} className="rounded-3xl border border-slate-200 p-4">
-            <div className="mb-3 flex items-start justify-between gap-3"><div><div className="text-lg font-semibold">{user.name}</div><div className="text-sm text-slate-500">{user.role}</div></div>{isAdmin ? <Button secondary onClick={() => removeUser(user.id)}>Delete</Button> : null}</div>
+            <div className="mb-3 flex items-start justify-between gap-3"><div><div className="text-lg font-semibold">{user.name}</div><div className="text-sm text-slate-500">{user.role}</div></div>{isAdmin && user.email !== PRIMARY_ADMIN_EMAIL ? <Button secondary onClick={() => removeUser(user.id)}>Delete</Button> : null}</div>
             <div className="grid gap-3 md:grid-cols-3">
-              <Field label="Name"><Input disabled={!isAdmin} value={user.name} onChange={(event) => setData((prev) => ({ ...prev, users: prev.users.map((item) => item.id === user.id ? { ...item, name: event.target.value } : item) }))} /></Field>
-              <Field label="Email"><Input disabled={!isAdmin} type="email" value={user.email} onChange={(event) => setData((prev) => ({ ...prev, users: prev.users.map((item) => item.id === user.id ? { ...item, email: event.target.value } : item) }))} /></Field>
-              <Field label="Role"><Select disabled={!isAdmin} value={user.role} onChange={(event) => setData((prev) => { const nextRole = event.target.value as UserRole; const adminCount = prev.users.filter((item) => item.role === "Admin").length; if (user.role === "Admin" && nextRole !== "Admin" && adminCount <= 1) { alert("You must keep at least one Admin user."); return prev; } return { ...prev, users: prev.users.map((item) => item.id === user.id ? { ...item, role: nextRole } : item) }; })}><option value="Admin">Admin</option><option value="Editor">Editor</option><option value="Viewer">Viewer</option></Select></Field>
+              <Field label="Name"><Input disabled={!isAdmin || user.email === PRIMARY_ADMIN_EMAIL} value={user.name} onChange={(event) => setData((prev) => ({ ...prev, users: prev.users.map((item) => item.id === user.id ? { ...item, name: event.target.value } : item) }))} /></Field>
+              <Field label="Email"><Input disabled={!isAdmin || user.email === PRIMARY_ADMIN_EMAIL} type="email" value={user.email} onChange={(event) => setData((prev) => ({ ...prev, users: prev.users.map((item) => item.id === user.id ? { ...item, email: event.target.value.trim().toLowerCase() } : item) }))} /></Field>
+              <Field label="Role"><Select disabled={!isAdmin || user.email === PRIMARY_ADMIN_EMAIL} value={user.role} onChange={(event) => setData((prev) => ({ ...prev, users: prev.users.map((item) => item.id === user.id ? { ...item, role: event.target.value as UserRole } : item) }))}><option value="Admin">Admin</option><option value="Editor">Editor</option><option value="Viewer">Viewer</option></Select></Field>
             </div>
           </div>
         ))}
@@ -970,9 +949,9 @@ function AppShell() {
   const [weatherError, setWeatherError] = useState("");
   const supabaseRef = useRef<SupabaseClient | null>(getSupabaseClient());
   const lastSavedJsonRef = useRef("");
-  const skipFirstSaveRef = useRef(true);
   const remoteLoadedRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
+  const remoteLoadTokenRef = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -982,7 +961,7 @@ function AppShell() {
       setSyncMessage("Using local browser storage");
       return;
     }
-    withTimeout(client.auth.getSession(), 8000, "Auth session check timed out")
+    withTimeout(client.auth.getSession(), 10000, "Auth session check timed out")
       .then(({ data: authData }) => {
         if (!active) return;
         setSession(authData.session ?? null);
@@ -990,7 +969,6 @@ function AppShell() {
       })
       .catch((error) => {
         if (!active) return;
-        console.error("Auth session check failed:", error);
         setSession(null);
         setAuthChecked(true);
         setSyncMessage(`Auth unavailable: ${error?.message || "unknown error"}`);
@@ -1005,42 +983,45 @@ function AppShell() {
     };
   }, []);
 
-  const currentEmail = session?.user?.email?.toLowerCase() || "";
-  const hasConfiguredEmails = data.users.some((user) => user.email.trim().length > 0);
-  const currentUser = data.users.find((user) => user.email.toLowerCase() === currentEmail);
-  const currentRole: UserRole = supabaseRef.current ? (!hasConfiguredEmails ? "Admin" : currentUser?.role || "Viewer") : "Admin";
+  const currentEmail = normalizeEmail(session?.user?.email || "");
+  const hasConfiguredEmails = data.users.some((user) => normalizeEmail(user.email).length > 0);
+  const currentUser = data.users.find((user) => normalizeEmail(user.email) === currentEmail);
+  const currentRole: UserRole = supabaseRef.current ? (currentEmail === PRIMARY_ADMIN_EMAIL ? "Admin" : currentUser?.role || "Viewer") : "Admin";
   const isAdmin = currentRole === "Admin";
   const canEdit = currentRole === "Admin" || currentRole === "Editor";
 
   useEffect(() => {
-    let active = true;
     const client = supabaseRef.current;
     if (!client || !session) return;
+    let active = true;
+    const token = remoteLoadTokenRef.current + 1;
+    remoteLoadTokenRef.current = token;
+    remoteLoadedRef.current = false;
     setSyncMessage("Connecting to shared database...");
     loadRemoteState(client)
-      .then((remoteState) => {
-        if (!active) return;
-        if (remoteState) {
-          remoteLoadedRef.current = true;
-          lastSavedJsonRef.current = JSON.stringify(remoteState);
-          setData(remoteState);
-          saveLocalState(remoteState);
-          setSyncMessage("Connected to shared database");
+      .then(async (remoteState) => {
+        if (!active || remoteLoadTokenRef.current !== token) return;
+        const nextState = sanitizeState(remoteState || loadLocalState());
+        remoteLoadedRef.current = true;
+        lastSavedJsonRef.current = JSON.stringify(nextState);
+        setData(nextState);
+        saveLocalState(nextState);
+        if (!remoteState) {
+          setSyncMessage("Creating shared database state...");
+          await saveRemoteState(client, nextState);
+          if (!active || remoteLoadTokenRef.current !== token) return;
+          setSyncMessage("Shared database initialized");
           return;
         }
-        const initial = loadLocalState();
-        remoteLoadedRef.current = true;
-        lastSavedJsonRef.current = JSON.stringify(initial);
-        setSyncMessage("Creating shared database state...");
-        return saveRemoteState(client, initial).then(() => {
-          if (!active) return;
-          setSyncMessage("Shared database initialized");
-        });
+        if (JSON.stringify(remoteState) !== JSON.stringify(nextState)) {
+          await saveRemoteState(client, nextState);
+          if (!active || remoteLoadTokenRef.current !== token) return;
+        }
+        setSyncMessage("Connected to shared database");
       })
       .catch((error) => {
-        if (!active) return;
-        console.error("Supabase connection failed:", error);
-        remoteLoadedRef.current = true;
+        if (!active || remoteLoadTokenRef.current !== token) return;
+        remoteLoadedRef.current = false;
         setSyncMessage(`Shared database unavailable: ${error?.message || "unknown error"}`);
       });
     return () => {
@@ -1053,39 +1034,28 @@ function AppShell() {
   }, [activeProjectId, data.projects]);
 
   useEffect(() => {
-    if (!data.projects.find((project) => project.id === activeProjectId)) {
-      setActiveProjectId(data.projects[0]?.id || null);
-    }
+    if (!data.projects.find((project) => project.id === activeProjectId)) setActiveProjectId(data.projects[0]?.id || null);
   }, [data.projects, activeProjectId]);
 
   useEffect(() => {
-    saveLocalState(data);
-    if (skipFirstSaveRef.current) {
-      skipFirstSaveRef.current = false;
-      return;
-    }
-
+    const sanitized = sanitizeState(data);
+    saveLocalState(sanitized);
     const client = supabaseRef.current;
-    const json = JSON.stringify(data);
-
+    const json = JSON.stringify(sanitized);
     if (json === lastSavedJsonRef.current) return;
-
-    if (!client || !session || !remoteLoadedRef.current) {
+    if (!client || !session) {
+      lastSavedJsonRef.current = json;
       if (!client) setSyncMessage("Saved locally in this browser");
       return;
     }
-
-    if (saveTimerRef.current !== null) {
-      window.clearTimeout(saveTimerRef.current);
-    }
-
+    if (!remoteLoadedRef.current) return;
+    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
     setSyncMessage("Waiting to save changes...");
     setSyncing(true);
-
     let active = true;
     saveTimerRef.current = window.setTimeout(() => {
       saveTimerRef.current = null;
-      saveRemoteState(client, data)
+      saveRemoteState(client, sanitized)
         .then(() => {
           if (!active) return;
           lastSavedJsonRef.current = json;
@@ -1093,14 +1063,12 @@ function AppShell() {
         })
         .catch((error) => {
           if (!active) return;
-          console.error("Supabase save failed:", error);
           setSyncMessage(`Shared save failed: ${error?.message || "unknown error"}`);
         })
         .finally(() => {
           if (active) window.setTimeout(() => setSyncing(false), 250);
         });
     }, 1200);
-
     return () => {
       active = false;
       if (saveTimerRef.current !== null) {
@@ -1115,7 +1083,7 @@ function AppShell() {
 
   function updateProject(projectId: string, updater: (project: Project) => Project) {
     if (!canEdit) return;
-    setData((prev) => ({ ...prev, projects: prev.projects.map((project) => (project.id === projectId ? updater(project) : project)) }));
+    setData((prev) => sanitizeState({ ...prev, projects: prev.projects.map((project) => (project.id === projectId ? updater(project) : project)) }));
   }
 
   async function handleAuthSubmit() {
@@ -1155,17 +1123,14 @@ function AppShell() {
   function addProject() {
     if (!canEdit) return;
     const newProject: Project = { id: uid(), name: `New Solar Project ${data.projects.length + 1}`, location: "", status: "Active", startDate: todayISO(), targetFinish: addWorkdays(todayISO(), 20), weather: buildDefaultWeather(), tasks: [], dailyEntries: [], settings: { useWeatherInProjection: true, trailingDays: 5 } };
-    setData((prev) => ({ ...prev, projects: [...prev.projects, newProject] }));
+    setData((prev) => sanitizeState({ ...prev, projects: [...prev.projects, newProject] }));
     setActiveProjectId(newProject.id);
     setTab("dashboard");
   }
 
   function removeProject(projectId: string) {
     if (!isAdmin) return;
-    setData((prev) => {
-      const remainingProjects = prev.projects.filter((project) => project.id !== projectId);
-      return { ...prev, projects: remainingProjects.length > 0 ? remainingProjects : [buildDefaultState().projects[0]] };
-    });
+    setData((prev) => sanitizeState({ ...prev, projects: prev.projects.filter((project) => project.id !== projectId) }));
   }
 
   function addTask() {
@@ -1195,20 +1160,16 @@ function AppShell() {
 
   function addUser() {
     if (!isAdmin) return;
-    setData((prev) => ({ ...prev, users: [...prev.users, { id: uid(), name: `User ${prev.users.length + 1}`, email: "", role: "Editor" }] }));
+    const userNumber = data.users.length + 1;
+    setData((prev) => ({
+      ...prev,
+      users: [...prev.users, { id: uid(), name: `User ${userNumber}`, email: "", role: "Editor" }],
+    }));
   }
 
   function removeUser(userId: string) {
     if (!isAdmin) return;
-    setData((prev) => {
-      const userToRemove = prev.users.find((user) => user.id === userId);
-      const adminCount = prev.users.filter((user) => user.role === "Admin").length;
-      if (userToRemove?.role === "Admin" && adminCount <= 1) {
-        alert("You cannot delete the last Admin user.");
-        return prev;
-      }
-      return { ...prev, users: prev.users.filter((user) => user.id !== userId) };
-    });
+    setData((prev) => sanitizeState({ ...prev, users: prev.users.filter((user) => user.id !== userId || user.email === PRIMARY_ADMIN_EMAIL) }));
   }
 
   async function refreshWeather() {
@@ -1226,9 +1187,7 @@ function AppShell() {
   }
 
   if (!authChecked) return <div className="p-6">Checking login...</div>;
-  if (supabaseRef.current && !session) {
-    return <AuthScreen loading={authLoading} mode={authMode} setMode={setAuthMode} email={authEmail} setEmail={setAuthEmail} password={authPassword} setPassword={setAuthPassword} onSubmit={handleAuthSubmit} message={authMessage} />;
-  }
+  if (supabaseRef.current && !session) return <AuthScreen loading={authLoading} mode={authMode} setMode={setAuthMode} email={authEmail} setEmail={setAuthEmail} password={authPassword} setPassword={setAuthPassword} onSubmit={handleAuthSubmit} message={authMessage} />;
   if (!activeProject || !projectMetrics) return <div className="p-6">Loading tracker...</div>;
 
   const recommendation = projectMetrics.remainingQty <= 0 ? "Project scope is fully complete against entered quantities." : projectMetrics.adjustedRate <= 0 ? "No production trend detected yet. Enter daily production to generate projections." : projectMetrics.finishSlipDays === 0 ? `At the current adjusted pace, this project is tracking on or ahead of schedule. Maintain at least ${fmt(projectMetrics.requiredDailyRate, 1)} units/day to protect the target finish.` : `At the current adjusted pace, the project is projected to finish ${projectMetrics.finishSlipDays} workday(s) late. Increase average output by about ${fmt(Math.max(0, projectMetrics.requiredDailyRate - projectMetrics.adjustedRate), 1)} units/day to recover the target date.`;
