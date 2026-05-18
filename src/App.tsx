@@ -972,6 +972,7 @@ function AppShell() {
   const lastSavedJsonRef = useRef("");
   const skipFirstSaveRef = useRef(true);
   const remoteLoadedRef = useRef(false);
+  const saveTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -1063,32 +1064,49 @@ function AppShell() {
       skipFirstSaveRef.current = false;
       return;
     }
+
     const client = supabaseRef.current;
     const json = JSON.stringify(data);
+
     if (json === lastSavedJsonRef.current) return;
+
     if (!client || !session || !remoteLoadedRef.current) {
-      lastSavedJsonRef.current = json;
       if (!client) setSyncMessage("Saved locally in this browser");
       return;
     }
-    let active = true;
+
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+
+    setSyncMessage("Waiting to save changes...");
     setSyncing(true);
-    saveRemoteState(client, data)
-      .then(() => {
-        if (!active) return;
-        lastSavedJsonRef.current = json;
-        setSyncMessage("Saved to shared database");
-      })
-      .catch((error) => {
-        if (!active) return;
-        console.error("Supabase save failed:", error);
-        setSyncMessage(`Shared save failed: ${error?.message || "unknown error"}`);
-      })
-      .finally(() => {
-        if (active) window.setTimeout(() => setSyncing(false), 250);
-      });
+
+    let active = true;
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      saveRemoteState(client, data)
+        .then(() => {
+          if (!active) return;
+          lastSavedJsonRef.current = json;
+          setSyncMessage("Saved to shared database");
+        })
+        .catch((error) => {
+          if (!active) return;
+          console.error("Supabase save failed:", error);
+          setSyncMessage(`Shared save failed: ${error?.message || "unknown error"}`);
+        })
+        .finally(() => {
+          if (active) window.setTimeout(() => setSyncing(false), 250);
+        });
+    }, 1200);
+
     return () => {
       active = false;
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
     };
   }, [data, session]);
 
